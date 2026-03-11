@@ -1,0 +1,10 @@
+streamlit>=1.31
+pandas
+numpy
+scipy
+baybe
+botorch
+torch
+rdkit-pypi
+scikit-fingerprints
+matplotlib
