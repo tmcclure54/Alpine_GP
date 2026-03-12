@@ -1,10 +1,9 @@
 streamlit>=1.31
-pandas
-numpy
-scipy
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
 baybe
 botorch
 torch
 rdkit-pypi
-scikit-fingerprints
-matplotlib
