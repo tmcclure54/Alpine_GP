@@ -787,6 +787,36 @@ def _ingest_df_and_persist(workdir: Path, cfg: CampaignConfig, campaign, df: pd.
         return
 
     df_use = df[param_cols + [target_col]].copy()
+
+    def _normalize_for_baybe(series: pd.Series, is_numeric: bool) -> pd.Series:
+        # BayBE fuzzy matching uses NumPy-style 2D indexing on `.values`, so we avoid
+        # Arrow-backed extension dtypes and coerce to plain NumPy/object-backed columns.
+        if is_numeric:
+            return pd.to_numeric(series, errors="coerce")
+        return series.astype("object")
+
+    numeric_param_types = (NumericalContinuousSpec, NumericalDiscreteSpec)
+    introduced_nulls: list[str] = []
+    for p in cfg.parameters:
+        before = df_use[p.name]
+        after = _normalize_for_baybe(before, isinstance(p, numeric_param_types))
+        if ((~before.isna()) & after.isna()).any():
+            introduced_nulls.append(p.name)
+        df_use[p.name] = after
+
+    target_before = df_use[target_col]
+    target_after = _normalize_for_baybe(target_before, is_numeric=True)
+    if ((~target_before.isna()) & target_after.isna()).any():
+        introduced_nulls.append(target_col)
+    df_use[target_col] = target_after
+
+    if introduced_nulls:
+        st.error(
+            "Failed to ingest results: datatype normalization introduced nulls in "
+            f"required columns {sorted(set(introduced_nulls))}."
+        )
+        return
+
     out_path = run_results_path(workdir, run_idx)
     df_use.to_csv(out_path, index=False)
     append_all_runs(workdir, df_use, run_idx=run_idx)
