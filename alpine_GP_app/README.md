@@ -67,6 +67,7 @@ What you should see:
   3. Recommend
   4. Ingest Results
   5. History
+  6. Campaign Dashboard
 - Storage controls for your working directory and campaign selection.
 
 ---
@@ -165,3 +166,51 @@ Fix: Ensure column names exactly match configured parameter and target names.
 ### Issue: No campaigns in browser
 Cause: No JSON campaign files found in `WORKDIR/campaign_jsons/`.
 Fix: Verify WORKDIR and confirm a campaign has been initialized previously.
+
+---
+
+## 9) Campaign Dashboard (tab 6)
+
+The **Campaign Dashboard** tab provides package-agnostic campaign analysis from a trials table (`results/all_runs.csv`).
+It does not rely on optimizer-specific APIs and works from dataframe columns only.
+
+### Expected columns
+
+The dashboard supports trials data containing any subset of:
+
+- `trial_index`
+- `yield` (or another numeric objective column)
+- `status`
+- `round_index`
+- `batch_index`
+- `run_index`
+- `sem`
+- `campaign`
+- `timestamp`
+
+All non-bookkeeping columns are treated as optimization parameters and analyzed automatically.
+
+### Dashboard controls
+
+At the top of the tab, users can:
+
+- choose the objective column,
+- switch between maximize/minimize mode,
+- filter to completed trials,
+- select which parameters to include in parameter-level analysis.
+
+### What the plots mean
+
+- **Campaign progress**: objective vs trial index plus best-so-far trend.
+- **Objective distribution**: histogram (or scatter-style view for very small datasets).
+- **Status distribution**: count of trials per status if a `status` column is present.
+- **Top trials table**: best rows sorted by objective in chosen direction.
+- **Categorical analysis**: mean objective by category with counts and summary table.
+- **Numerical analysis**: parameter value vs objective scatter, with binned mean overlay.
+- **Round/Batch analysis**: objective distribution by `round_index`, `batch_index`, or `run_index` if present.
+
+### Exports
+
+- Figures are auto-saved as PNG files under `WORKDIR/plots/<campaign_name>/analysis/`.
+- Cleaned dashboard data can be downloaded as CSV.
+- Dashboard summary statistics can be downloaded as JSON.

@@ -30,6 +30,7 @@ from core.persistence import (
 )
 from core.sobol_init import sobol_initial_design
 from core.dedup import measured_keys, drop_measured
+from core.campaign_dashboard import render_campaign_dashboard
 
 APP_TITLE = "Alpine-GP"
 
@@ -517,7 +518,14 @@ def main() -> None:
     st.sidebar.header("Navigation")
     page = st.sidebar.radio(
         "Go to",
-        ["1) Configure", "2) Initialize", "3) Recommend", "4) Ingest Results", "5) History"],
+        [
+            "1) Configure",
+            "2) Initialize",
+            "3) Recommend",
+            "4) Ingest Results",
+            "5) History",
+            "6) Campaign Dashboard",
+        ],
     )
 
     st.sidebar.header("Storage")
@@ -550,8 +558,10 @@ def main() -> None:
         render_recommend_page(workdir)
     elif page.startswith("4"):
         render_ingest_page(workdir)
-    else:
+    elif page.startswith("5"):
         render_history_page(workdir)
+    else:
+        render_campaign_dashboard_page(workdir)
 
 
 
@@ -1103,6 +1113,19 @@ def render_history_page(workdir: Path) -> None:
         st.dataframe(pd.DataFrame(files), use_container_width=True)
     else:
         st.info("No files created yet.")
+
+
+def render_campaign_dashboard_page(workdir: Path) -> None:
+    st.subheader("6) Campaign Dashboard")
+    cfg = CampaignConfig.from_dict(st.session_state["config"])
+    runs_path = all_runs_path(workdir)
+    if not runs_path.exists():
+        st.info("No all_runs.csv found yet. Ingest results to populate the dashboard.")
+        return
+
+    df_trials = pd.read_csv(runs_path)
+    campaign_dir = workdir / "plots" / cfg.campaign_name
+    render_campaign_dashboard(df_trials=df_trials, campaign_dir=campaign_dir)
 
 
 if __name__ == "__main__":
