@@ -138,7 +138,7 @@ def _default_config() -> CampaignConfig:
         init_mode="sobol",
         n_init=8,
         acquisition="qExpectedImprovement",
-        acquisition_kwargs={"best_f": None},
+        acquisition_kwargs={},
         parameters=[
             CategoricalSpec(name="solvent", values=["MeCN", "HFIP"], encoding="OHE"),
             NumericalDiscreteSpec(name="reaction_time", values=[1.0, 2.0, 3.0], unit="h"),

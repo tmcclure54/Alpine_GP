@@ -57,7 +57,7 @@ The GUI lets you choose BayBE acquisition wrappers:
 - `qThompsonSampling` (≈ qTS)
 - plus a few single-point variants.
 
-Internally we call `baybe.acquisition.utils.str_to_acqf(...)` so kwargs can be passed via JSON.
+Internally we call `baybe.acquisition.utils.str_to_acqf(...)`. In the currently pinned BayBE version, extra JSON kwargs are ignored because `str_to_acqf` only accepts the acquisition name.
 
 ## Notes / limitations
 

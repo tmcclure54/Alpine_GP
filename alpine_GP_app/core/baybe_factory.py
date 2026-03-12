@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List
+import warnings
 
 from rdkit import Chem
 
@@ -142,7 +143,13 @@ def build_recommender(cfg: CampaignConfig) -> BotorchRecommender:
         "qPI": "qProbabilityOfImprovement",
     }
     acq_name = alias.get(cfg.acquisition, cfg.acquisition)
-    acqf = str_to_acqf(acq_name, **(cfg.acquisition_kwargs or {}))
+    if cfg.acquisition_kwargs:
+        warnings.warn(
+            "acquisition_kwargs are ignored because this BayBE version's str_to_acqf does not accept kwargs.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    acqf = str_to_acqf(acq_name)
     return BotorchRecommender(acquisition_function=acqf)
 
 

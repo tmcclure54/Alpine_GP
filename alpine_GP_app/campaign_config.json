@@ -6,9 +6,7 @@
   "init_mode": "sobol",
   "n_init": 8,
   "acquisition": "qExpectedImprovement",
-  "acquisition_kwargs": {
-    "best_f": null
-  },
+  "acquisition_kwargs": {},
   "parameters": [
     {
       "name": "solvent",
