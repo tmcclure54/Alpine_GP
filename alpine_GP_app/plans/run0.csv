@@ -1,9 +1,9 @@
 solvent,reaction_time,Photocatalyst
-MeCN,3.0,"""[PF6-].[Ir+](n1ccccc1-c1c(F)cc(C)cc1F)(n1ccccc1-c1c(F)cc(C)cc1F)(n1cc(c(c(c1)C)C)cc(c1)C)"",  # IrdFMeppydtbbpy (approximate)"
-THF,1.0,N#Cc1c(Cl)c(N2c3ccccc3c3ccccc32)c(N2c3ccccc3c3ccccc32)c(C#N)c1N2c3ccccc3c3ccccc32
-EtOAc,5.0,"""[Ir](n1ccccc1-c1ccccc1)(n1ccccc1-c1ccccc1)(n1ccccc1-c1ccccc1)"",  # facIrppy3"
-PhMe,2.0,N#Cc1c(N(c2ccccc2)c2ccccc2)c(N(c2ccccc2)c2ccccc2)c(C#N)c(N(c2ccccc2)c2ccccc2)c1N(c2ccccc2)c2ccccc2
-HFIP,24.0,[B-](F)(F)(F)F.[o+]1c(-c2ccccc2)cc(-c2ccccc2)cc1-c1ccccc1
-EtOAc,2.0,"""[PF6-].[Ir+](n1ccccc1-c1c(F)cc(C)cc1F)(n1ccccc1-c1c(F)cc(C)cc1F)(n1cc(c(c(c1)C)C)cc(c1)C)"",  # IrdFMeppydtbbpy (approximate)"
-DMSO,5.0,N#Cc1cc(N2c3ccccc3c3ccccc32)c(N2c3ccccc3c3ccccc32)c(C#N)c1
-MeCN,2.0,"""[Ir](n1ccccc1-c1c(F)cccc1F)(n1ccccc1-c1c(F)cccc1F)(n1ccccc1-c1c(F)cccc1F)""  # facIrdFppy3"
+MeCN,2.0,IrF
+HFIP,1.0,3CzClIPN
+HFIP,3.0,IrdFppyditbubpy
+MeCN,1.0,4CzPN
+MeCN,3.0,4CzTPN
+HFIP,2.0,IrF
+HFIP,2.0,4DPAIPN
+MeCN,1.0,facIrppy3
