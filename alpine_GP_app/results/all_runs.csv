@@ -1,0 +1,9 @@
+run_idx,Photocatalyst,reaction_time,solvent,yield
+0,3DPA2FBN,2,HFIP,0.994523788
+0,Rubpy,1,MeCN,0.15094464
+0,IrdFMeppydtbbpy,3,HFIP,0.322145165
+0,4DPAIPN,1,MeCN,0.899134621
+0,4CzPN,3,MeCN,0.406975625
+0,IrdFppyditbubpy,2,HFIP,0.905368576
+0,facIrppy3,2,MeCN,0.271013644
+0,3CzClIPN,1,HFIP,0.17210469
