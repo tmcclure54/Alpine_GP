@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import List
 
+from rdkit import Chem
+
 from baybe.acquisition.utils import str_to_acqf
 from baybe.campaign import Campaign
 from baybe.objectives import SingleTargetObjective
@@ -36,14 +38,41 @@ def _unique_in_order(values: List[str]) -> List[str]:
     return unique
 
 
+def _clean_smiles_entry(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+
+    # Allow users to paste python-list style lines, e.g. "<smiles>",  # comment
+    if " #" in cleaned:
+        cleaned = cleaned.split(" #", 1)[0].rstrip()
+    cleaned = cleaned.rstrip(",").strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
+def _normalize_unique_smiles(values: List[str]) -> List[str]:
+    cleaned = [_clean_smiles_entry(sm) for sm in values]
+    return _unique_in_order([sm for sm in cleaned if sm])
+
+
 def validate_parameter_specs(specs: List[ParameterSpec]) -> None:
     for s in specs:
         if isinstance(s, SubstanceSpec):
-            unique_smiles = _unique_in_order([sm.strip() for sm in s.smiles if sm.strip()])
+            unique_smiles = _normalize_unique_smiles(s.smiles)
             if len(unique_smiles) < 2:
                 raise ValueError(
                     f"Substance parameter '{s.name}' needs at least 2 unique SMILES entries; "
                     f"got {len(unique_smiles)}."
+                )
+            invalid = [sm for sm in unique_smiles if Chem.MolFromSmiles(sm) is None]
+            if invalid:
+                shown = ", ".join(invalid[:5])
+                extra = f" (+{len(invalid) - 5} more)" if len(invalid) > 5 else ""
+                raise ValueError(
+                    f"Substance parameter '{s.name}' contains invalid SMILES: {shown}{extra}. "
+                    "Use one raw SMILES per line (no quotes, trailing commas, or inline comments)."
                 )
 
 
@@ -87,7 +116,7 @@ def build_parameters(specs: List[ParameterSpec]):
 
         elif isinstance(s, SubstanceSpec):
             enc = SubstanceEncoding[s.encoding]
-            unique_smiles = _unique_in_order([sm.strip() for sm in s.smiles if sm.strip()])
+            unique_smiles = _normalize_unique_smiles(s.smiles)
             params.append(
                 SubstanceParameter(
                     name=s.name,
