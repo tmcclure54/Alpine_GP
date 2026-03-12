@@ -16,7 +16,7 @@ from baybe.parameters.enum import SubstanceEncoding
 from baybe.parameters.substance import SubstanceParameter
 from baybe.recommenders import BotorchRecommender
 from baybe.searchspace import SearchSpace
-from baybe.targets import NumericalTarget
+from baybe.targets import NumericalTarget, TargetMode
 
 from .schema import (
     CampaignConfig,
@@ -149,7 +149,16 @@ def build_recommender(cfg: CampaignConfig) -> BotorchRecommender:
 def build_campaign(cfg: CampaignConfig) -> Campaign:
     params = build_parameters(cfg.parameters)
     searchspace = SearchSpace.from_product(params)
-    target = NumericalTarget(name=cfg.objective_target, mode=cfg.objective_mode)
+    mode_alias = {
+        "maximize": TargetMode.MAX,
+        "max": TargetMode.MAX,
+        "maximise": TargetMode.MAX,
+        "minimize": TargetMode.MIN,
+        "min": TargetMode.MIN,
+        "minimise": TargetMode.MIN,
+    }
+    mode = mode_alias.get(str(cfg.objective_mode).strip().lower(), cfg.objective_mode)
+    target = NumericalTarget(name=cfg.objective_target, mode=mode)
     objective = SingleTargetObjective(target=target)
     recommender = build_recommender(cfg)
     return Campaign(searchspace=searchspace, objective=objective, recommender=recommender)
