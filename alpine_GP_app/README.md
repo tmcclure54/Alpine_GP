@@ -1,66 +1,167 @@
-# BayBE Optimizer GUI (Streamlit)
+# Alpine-GP BayBE Optimizer (Streamlit)
 
-This is a **worked example** Streamlit GUI that wraps a BayBE + BoTorch backend for lab-friendly Bayesian optimization.
+## 1) Project Overview
 
-It implements the same core loop as your notebook:
+This project provides a simple web app for **Bayesian optimization of chemical reactions**.
 
-1. **Recommend** a batch → write `plans/runN.csv`
-2. Run experiments
-3. Copy plan → `results/runN_results.csv`, add a `yield` column
-4. **Ingest** results (validates columns) → `campaign.add_measurements(...)`
-5. Repeat
+In plain terms, it helps you:
+- define a reaction design space (solvent, catalyst, temperature, etc.),
+- generate suggested experiments,
+- enter measured results,
+- and iteratively improve reaction conditions with BayBE.
 
-## Folder layout (inside WORKDIR)
+The interface is built with **Streamlit**, so you can use it from a browser without writing Python code during routine use.
 
-- `campaign_config.json` (human-editable)
-- `plans/run0.csv`, `plans/run1.csv`, ...
-- `results/run0_results.csv`, ...
-- `results/all_runs.csv` (append-only log across all runs)
-- `campaign_jsons/<campaign>_latest.json` (mutable state)
-- `campaign_jsons/<campaign>_after_*.json` (immutable snapshots)
+---
 
-## Running
+## 2) Installation
+
+### Step A: Install Python
+1. Install Python 3.10+ from [python.org](https://www.python.org/downloads/).
+2. Confirm installation in a terminal:
 
 ```bash
-cd alpine_GP_app
+python --version
+```
+
+### Step B (recommended): Create a virtual environment
+From inside the `alpine_GP_app` folder:
+
+```bash
+python -m venv .venv
+```
+
+Activate it:
+
+- **Windows (PowerShell)**
+```bash
+.\.venv\Scripts\Activate.ps1
+```
+
+- **macOS/Linux**
+```bash
+source .venv/bin/activate
+```
+
+### Step C: Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 3) Running the App
+
+From the `alpine_GP_app` directory:
+
+```bash
 streamlit run app.py
 ```
 
-In the sidebar you can set **WORKDIR** (e.g., a shared network folder) and the **campaign name**.
+What you should see:
+- A browser tab opens with the Alpine-GP app.
+- A left sidebar with navigation pages:
+  1. Configure
+  2. Initialize
+  3. Recommend
+  4. Ingest Results
+  5. History
+- Storage controls for your working directory and campaign selection.
 
-## Parameter types and encodings
+---
 
-### Numerical continuous
-- UI: lower/upper bounds
-- BayBE: `NumericalContinuousParameter(bounds=(lo, hi))`
+## 4) Creating a New Optimization Campaign
 
-### Numerical discrete
-- UI: explicit list of values
-- BayBE: `NumericalDiscreteParameter(values=[...])`
+1. **Choose a working directory (WORKDIR)** in the sidebar.
+   - This is where all files are saved.
+2. Go to **1) Configure**:
+   - define parameter names/types/values,
+   - set objective target column (typically `yield`),
+   - set optimization direction (usually maximize).
+3. Go to **2) Initialize**:
+   - choose `sobol` or `existing_data` initialization,
+   - generate initial experiments.
+4. Go to **3) Recommend** to generate the next batch.
 
-### Categorical
-- UI: explicit list of categories + encoding
-- BayBE: `CategoricalParameter(values=[...], encoding=OHE|INT)`
+Files created in WORKDIR:
+- `plans/runN.csv` for suggested experiments,
+- `results/runN_results.csv` for ingested outcomes,
+- `results/all_runs.csv` combined run history,
+- `campaign_jsons/<campaign>_latest.json` active campaign state,
+- `campaign_jsons/<campaign>_*.json` snapshots.
 
-### Substance (cheminformatics)
-- UI: map **labels → SMILES** + an embedding/descriptor option
-- BayBE: `SubstanceParameter(data={label: smiles, ...}, encoding=SubstanceEncoding.<...>)`
+---
 
-BayBE exposes many descriptor/fingerprint options (e.g., **MORDRED**, **RDKIT2DDESCRIPTORS**, **ECFP**, **MACCS**). Under the hood these route through `scikit-fingerprints` / RDKit-compatible tooling (see BayBE docs).
+## 5) Resuming an Existing Campaign
 
-## Acquisition functions
+1. In the sidebar, use the **Campaign browser**.
+2. Select a campaign from the dropdown (`campaign name + timestamp`).
+3. Review metadata shown below the dropdown.
+4. Click **Load selected campaign**.
+5. Continue using Recommend/Ingest pages.
 
-The GUI lets you choose BayBE acquisition wrappers:
+The app keeps the loaded campaign in session state and marks it as active.
 
-- `qExpectedImprovement` (≈ qEI)
-- `qUpperConfidenceBound` (≈ qUCB)
-- `qThompsonSampling` (≈ qTS)
-- plus a few single-point variants.
+---
 
-Internally we call `baybe.acquisition.utils.str_to_acqf(...)`. In the currently pinned BayBE version, extra JSON kwargs are ignored because `str_to_acqf` only accepts the acquisition name.
+## 6) Entering Experimental Results
 
-## Notes / limitations
+Prepare a CSV with:
+- all parameter columns used in the campaign, and
+- the objective column (for example `yield`).
 
-- The **Sobol init** here is pragmatic: it uses `scipy.stats.qmc.Sobol` and indexes categorical/substance values by the Sobol coordinate. For many chemistry problems this is “good enough” to seed the model with diverse conditions; if you want a more principled discrete DOE (e.g., FPS / maximin), we can swap in BayBE’s space-filling recommenders.
-- Deleting a parameter deletes it from the config; you should **re-initialize** the campaign if the parameter set changes.
+Example:
 
+```csv
+solvent,catalyst,temp,yield
+MeCN,A,25,0.63
+HFIP,A,25,0.71
+```
+
+### Important yield format
+**Yields must be fractions between 0 and 1.**
+
+- 63% → `0.63`
+- 91% → `0.91`
+
+Invalid examples:
+- `63`
+- `120`
+- `-5`
+
+The app now strictly validates this and rejects out-of-range entries.
+
+---
+
+## 7) Typical Workflow
+
+1. Initialize campaign  
+2. Run suggested experiments in the lab  
+3. Measure yields  
+4. Enter yields into CSV (fraction format 0–1)  
+5. Upload/ingest results  
+6. Generate next experiment suggestions  
+7. Repeat until performance is satisfactory
+
+---
+
+## 8) Troubleshooting
+
+### Issue: “yield outside [0,1]”
+Cause: Results entered as percentages (e.g., `63`) instead of fractions (`0.63`).
+Fix: Convert all yield entries to values between 0 and 1.
+
+### Issue: Configuration mismatch warning
+Cause: Current UI settings do not match the loaded campaign design space/objective.
+Fix:
+- Load the correct campaign from the campaign browser, or
+- update parameter/objective settings to match.
+
+### Issue: Missing required CSV columns
+Cause: CSV does not include one or more parameter columns or target column.
+Fix: Ensure column names exactly match configured parameter and target names.
+
+### Issue: No campaigns in browser
+Cause: No JSON campaign files found in `WORKDIR/campaign_jsons/`.
+Fix: Verify WORKDIR and confirm a campaign has been initialized previously.

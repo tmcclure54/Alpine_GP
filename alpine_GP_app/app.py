@@ -1,6 +1,7 @@
 import json
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -127,6 +128,178 @@ def _config_validation_errors(cfg: CampaignConfig) -> List[str]:
     except ValueError as exc:
         return [str(exc)]
     return []
+
+
+def _campaign_name_from_path(path: Path) -> str:
+    stem = path.stem
+    return stem[:-7] if stem.endswith("_latest") else stem
+
+
+def _extract_campaign_metadata(path: Path) -> Dict[str, Any]:
+    """Read lightweight metadata from a persisted BayBE campaign JSON."""
+    raw = json.loads(load_text(path))
+    objective = raw.get("objective", {}) or {}
+    target = objective.get("target", {}) or {}
+
+    param_meta: List[Dict[str, Any]] = []
+    searchspace = raw.get("searchspace", {}) or {}
+    for p in (searchspace.get("discrete", {}) or {}).get("parameters", []) or []:
+        param_meta.append(
+            {
+                "name": p.get("name"),
+                "type": p.get("type", "unknown"),
+                "values": p.get("values") or p.get("active_values") or p.get("data"),
+            }
+        )
+    for p in (searchspace.get("continuous", {}) or {}).get("parameters", []) or []:
+        param_meta.append(
+            {
+                "name": p.get("name"),
+                "type": p.get("type", "NumericalContinuousParameter"),
+                "values": p.get("bounds"),
+            }
+        )
+
+    completed_measurements = 0
+    try:
+        from baybe.campaign import Campaign
+
+        completed_measurements = int(Campaign.from_json(load_text(path)).measurements.shape[0])
+    except Exception:
+        completed_measurements = -1
+
+    return {
+        "path": path,
+        "campaign_name": _campaign_name_from_path(path),
+        "objective_target": target.get("name", "unknown"),
+        "objective_mode": "minimize" if target.get("minimize") else "maximize",
+        "parameter_names": [p["name"] for p in param_meta if p.get("name")],
+        "parameters": param_meta,
+        "completed_measurements": completed_measurements,
+        "last_modified": datetime.fromtimestamp(path.stat().st_mtime),
+    }
+
+
+def _discover_campaigns(workdir: Path) -> List[Dict[str, Any]]:
+    campaign_dir = workdir / "campaign_jsons"
+    latest_files = sorted(campaign_dir.glob("*_latest.json"))
+    files = latest_files if latest_files else sorted(campaign_dir.glob("*.json"))
+    out: List[Dict[str, Any]] = []
+    for path in files:
+        try:
+            out.append(_extract_campaign_metadata(path))
+        except Exception:
+            continue
+    return out
+
+
+def _build_specs_from_metadata(meta: Dict[str, Any]) -> List[ParameterSpec]:
+    specs: List[ParameterSpec] = []
+    for p in meta.get("parameters", []):
+        p_type = p.get("type", "")
+        name = p.get("name")
+        values = p.get("values")
+        if not name:
+            continue
+        if p_type == "CategoricalParameter" and isinstance(values, list):
+            specs.append(CategoricalSpec(name=name, values=[str(v) for v in values], encoding="OHE"))
+        elif p_type == "NumericalDiscreteParameter" and isinstance(values, list):
+            specs.append(NumericalDiscreteSpec(name=name, values=[float(v) for v in values]))
+        elif p_type == "NumericalContinuousParameter" and isinstance(values, list) and len(values) == 2:
+            specs.append(NumericalContinuousSpec(name=name, lower=float(values[0]), upper=float(values[1])))
+    return specs
+
+
+def _compare_config_to_campaign(cfg: CampaignConfig, meta: Dict[str, Any]) -> List[str]:
+    mismatches: List[str] = []
+    if cfg.campaign_name != meta.get("campaign_name"):
+        mismatches.append(f"Campaign name: config '{cfg.campaign_name}' vs loaded '{meta.get('campaign_name')}'")
+    if cfg.objective_target != meta.get("objective_target"):
+        mismatches.append(f"Objective target: config '{cfg.objective_target}' vs loaded '{meta.get('objective_target')}'")
+
+    cfg_params = {p.name: p for p in cfg.parameters}
+    loaded_params = {p.get("name"): p for p in meta.get("parameters", []) if p.get("name")}
+    if list(cfg_params.keys()) != list(loaded_params.keys()):
+        mismatches.append(
+            f"Parameter names/order differ: config {list(cfg_params.keys())} vs loaded {list(loaded_params.keys())}"
+        )
+
+    for pname, lp in loaded_params.items():
+        cp = cfg_params.get(pname)
+        if cp is None:
+            continue
+        loaded_type = lp.get("type", "")
+        cfg_type = type(cp).__name__.replace("Spec", "Parameter")
+        if loaded_type and loaded_type != cfg_type:
+            mismatches.append(f"Parameter '{pname}' type differs: config {cfg_type} vs loaded {loaded_type}")
+
+        if isinstance(cp, CategoricalSpec) and isinstance(lp.get("values"), list):
+            if sorted(cp.values) != sorted([str(v) for v in lp["values"]]):
+                mismatches.append(f"Parameter '{pname}' categories differ between config and loaded campaign")
+    return mismatches
+
+
+def _render_campaign_browser(workdir: Path) -> None:
+    st.sidebar.subheader("Campaign browser")
+    campaigns = _discover_campaigns(workdir)
+    if not campaigns:
+        st.sidebar.info("No saved campaigns found in campaign_jsons/.")
+        return
+
+    label_map = {
+        i: f"{c['campaign_name']} ({c['last_modified'].strftime('%Y-%m-%d %H:%M:%S')})"
+        for i, c in enumerate(campaigns)
+    }
+    selected_idx = st.sidebar.selectbox(
+        "Saved campaigns",
+        options=list(label_map.keys()),
+        format_func=lambda x: label_map[x],
+    )
+    selected = campaigns[selected_idx]
+
+    completed_str = "unknown" if selected["completed_measurements"] < 0 else str(selected["completed_measurements"])
+    st.sidebar.markdown("**Selected campaign metadata**")
+    st.sidebar.caption(
+        f"- name: `{selected['campaign_name']}`\n"
+        f"- objective target: `{selected['objective_target']}`\n"
+        f"- optimization mode: `{selected['objective_mode']}`\n"
+        f"- completed measurements: `{completed_str}`\n"
+        f"- parameters: `{', '.join(selected['parameter_names'])}`\n"
+        f"- last modified: `{selected['last_modified'].strftime('%Y-%m-%d %H:%M:%S')}`"
+    )
+
+    if st.sidebar.button("Load selected campaign"):
+        from baybe.campaign import Campaign
+
+        st.session_state["campaign"] = Campaign.from_json(load_text(selected["path"]))
+        st.session_state["campaign_name"] = selected["campaign_name"]
+        st.session_state["active_campaign_path"] = str(selected["path"])
+        st.session_state["active_campaign_meta"] = selected
+
+        cfg = CampaignConfig.from_dict(st.session_state["config"])
+        cfg.campaign_name = selected["campaign_name"]
+        cfg.objective_target = selected["objective_target"]
+        cfg.objective_mode = selected["objective_mode"]
+        inferred_specs = _build_specs_from_metadata(selected)
+        if inferred_specs:
+            cfg.parameters = inferred_specs
+        st.session_state["config"] = cfg.to_dict()
+        st.success(f"Loaded campaign '{selected['campaign_name']}'.")
+        st.rerun()
+
+
+def _check_campaign_config_compatibility(cfg: CampaignConfig, workdir: Path) -> bool:
+    latest = campaign_latest_path(workdir, cfg.campaign_name)
+    if not latest.exists():
+        return True
+    meta = _extract_campaign_metadata(latest)
+    mismatches = _compare_config_to_campaign(cfg, meta)
+    if not mismatches:
+        return True
+
+    st.warning("Configuration mismatch with loaded campaign:\n- " + "\n- ".join(mismatches))
+    key = f"confirm_mismatch_{cfg.campaign_name}"
+    return st.checkbox("I understand and want to proceed with this mismatch.", key=key)
 
 
 def _default_config() -> CampaignConfig:
@@ -355,13 +528,19 @@ def main() -> None:
     )
     workdir = Path(workdir_str).expanduser().resolve()
 
-    campaign_name = st.sidebar.text_input("Campaign name", value="default")
+    default_campaign = st.session_state.get("campaign_name", "default")
+    campaign_name = st.sidebar.text_input("Campaign name", value=default_campaign)
     ensure_campaign_dirs(workdir)
+    _render_campaign_browser(workdir)
 
     if "config" not in st.session_state:
         st.session_state["config"] = _default_config().to_dict()
 
+    st.session_state["campaign_name"] = campaign_name
     st.session_state["config"]["campaign_name"] = campaign_name
+
+    if st.session_state.get("active_campaign_path"):
+        st.sidebar.success(f"Active campaign: {st.session_state.get('campaign_name', campaign_name)}")
 
     if page.startswith("1"):
         render_config_page(workdir)
@@ -627,6 +806,7 @@ def render_init_page(workdir: Path) -> None:
             st.error(msg)
         st.info("Fix the campaign configuration on the Configure page before initializing.")
         return
+    config_is_compatible = _check_campaign_config_compatibility(cfg, workdir)
     st.info(
         "Initialization writes an initial plan (run0.csv) and persists a BayBE campaign JSON. "
         "Choose Sobol init for a cold start, or ingest an existing CSV for a warm start."
@@ -643,7 +823,7 @@ def render_init_page(workdir: Path) -> None:
 
     if cfg.init_mode == "sobol":
         seed = int(st.number_input("Sobol seed", min_value=0, value=0, step=1))
-        if st.button("Generate run0.csv via Sobol"):
+        if st.button("Generate run0.csv via Sobol", disabled=not config_is_compatible):
             plan0 = sobol_initial_design(cfg.parameters, n=cfg.n_init, seed=seed)
             out_path = run_plan_path(workdir, run_idx=0)
             plan0.to_csv(out_path, index=False)
@@ -657,12 +837,15 @@ def render_init_page(workdir: Path) -> None:
             _download_button_df("Download run0.csv", plan0, "run0.csv")
 
     else:
-        st.caption("Upload a CSV with columns = parameters + target. The first N rows are ingested as initial data.")
+        st.caption(
+            "Upload a CSV with columns = parameters + target. The first N rows are ingested as initial data. "
+            "Enter yields as fractions (0–1). Example: 0.63 for 63% yield."
+        )
         up = st.file_uploader("Upload initial results CSV", type=["csv"], key="initcsv")
         if up is not None:
             df = pd.read_csv(up)
             st.dataframe(df.head(20), use_container_width=True)
-            if st.button("Initialize from this CSV"):
+            if st.button("Initialize from this CSV", disabled=not config_is_compatible):
                 try:
                     campaign = build_campaign(cfg)
                 except Exception as exc:
@@ -674,6 +857,10 @@ def render_init_page(workdir: Path) -> None:
                     st.error(f"Missing required columns: {missing}")
                     st.stop()
                 df0 = df[needed].iloc[: cfg.n_init].copy()
+                target_error = _validate_fraction_target(df0, cfg.objective_target)
+                if target_error:
+                    st.error(target_error)
+                    return
                 campaign.add_measurements(df0)
                 save_text(latest, campaign.to_json())
                 init_path = workdir / "results" / "initial_data_results.csv"
@@ -690,6 +877,7 @@ def render_recommend_page(workdir: Path) -> None:
     if not latest.exists():
         st.error("No campaign JSON found. Go to 'Initialize' first.")
         return
+    config_is_compatible = _check_campaign_config_compatibility(cfg, workdir)
 
     from baybe.campaign import Campaign
 
@@ -698,7 +886,7 @@ def render_recommend_page(workdir: Path) -> None:
     st.markdown(f"Next run index: **{next_run}**")
     st.caption("This writes plans/runN.csv and snapshots the campaign state after recommendation.")
 
-    if st.button("Recommend batch"):
+    if st.button("Recommend batch", disabled=not config_is_compatible):
         param_cols = [p.name for p in cfg.parameters]
         keys = measured_keys(workdir, param_cols)
         needed = int(cfg.batch_size)
@@ -740,6 +928,23 @@ def render_recommend_page(workdir: Path) -> None:
 
 
 
+def _validate_fraction_target(df: pd.DataFrame, target_col: str) -> Optional[str]:
+    """Validate target values are numeric fractions in [0, 1]."""
+    vals = pd.to_numeric(df[target_col], errors="coerce")
+    if vals.isna().any():
+        return (
+            f"Column '{target_col}' contains non-numeric values. "
+            "Enter yields as fractions (0–1). Example: 0.63 for 63% yield."
+        )
+    out_of_bounds = (~vals.between(0.0, 1.0)).sum()
+    if out_of_bounds:
+        return (
+            f"Column '{target_col}' has {int(out_of_bounds)} value(s) outside [0, 1]. "
+            "Enter yields as fractions (0–1). Example: 0.63 for 63% yield."
+        )
+    return None
+
+
 def render_ingest_page(workdir: Path) -> None:
     st.subheader("4) Ingest results + update campaign")
     cfg = CampaignConfig.from_dict(st.session_state["config"])
@@ -747,12 +952,14 @@ def render_ingest_page(workdir: Path) -> None:
     if not latest.exists():
         st.error("No campaign JSON found. Go to 'Initialize' first.")
         return
+    config_is_compatible = _check_campaign_config_compatibility(cfg, workdir)
 
     from baybe.campaign import Campaign
 
     campaign = Campaign.from_json(load_text(latest))
     st.caption(
-        "Upload a results CSV (typically a copy of the plan CSV with an extra target column), or point the app to the on-disk results file."
+        "Upload a results CSV (typically a copy of the plan CSV with an extra target column), or point the app to the on-disk results file. "
+        "Enter yields as fractions (0–1). Example: 0.63 for 63% yield."
     )
     run_idx = int(st.number_input("Run index for this results file", min_value=0, value=0, step=1))
     up = st.file_uploader("Upload results CSV", type=["csv"], key="resultscsv")
@@ -764,12 +971,12 @@ def render_ingest_page(workdir: Path) -> None:
         if up is not None:
             df = pd.read_csv(up)
             st.dataframe(df.head(20), use_container_width=True)
-            if st.button("Ingest uploaded results"):
+            if st.button("Ingest uploaded results", disabled=not config_is_compatible):
                 _ingest_df_and_persist(workdir, cfg, campaign, df, run_idx)
     with colB:
         disk_path = run_results_path(workdir, run_idx)
         st.code(str(disk_path))
-        if st.button("Ingest results from disk path"):
+        if st.button("Ingest results from disk path", disabled=not config_is_compatible):
             if not disk_path.exists():
                 st.error(f"Missing: {disk_path}")
                 st.stop()
@@ -787,6 +994,11 @@ def _ingest_df_and_persist(workdir: Path, cfg: CampaignConfig, campaign, df: pd.
         return
 
     df_use = df[param_cols + [target_col]].copy()
+
+    target_error = _validate_fraction_target(df_use, target_col)
+    if target_error:
+        st.error(target_error)
+        return
 
     def _normalize_for_baybe(series: pd.Series, is_numeric: bool) -> pd.Series:
         # BayBE fuzzy matching uses NumPy-style 2D indexing on `.values`, so we avoid
