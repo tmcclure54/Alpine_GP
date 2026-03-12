@@ -105,6 +105,22 @@ def _json_download_button(label: str, obj: Any, filename: str) -> None:
     )
 
 
+def _normalize_smiles_input(lines: List[str]) -> List[str]:
+    normalized: List[str] = []
+    for line in lines:
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        if " #" in cleaned:
+            cleaned = cleaned.split(" #", 1)[0].rstrip()
+        cleaned = cleaned.rstrip(",").strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+            cleaned = cleaned[1:-1].strip()
+        if cleaned:
+            normalized.append(cleaned)
+    return list(dict.fromkeys(normalized))
+
+
 def _config_validation_errors(cfg: CampaignConfig) -> List[str]:
     try:
         validate_parameter_specs(cfg.parameters)
@@ -494,7 +510,7 @@ def render_parameter_editor(p: ParameterSpec) -> ParameterSpec:
             key=f"smiles_{p.name}",
             height=160,
         )
-        smiles = [ln.strip() for ln in smiles_text.splitlines() if ln.strip()]
+        smiles = _normalize_smiles_input(smiles_text.splitlines())
 
         from baybe.parameters.enum import SubstanceEncoding
         enc_options = [e.name for e in SubstanceEncoding]
@@ -566,7 +582,7 @@ def render_add_parameter(cfg: CampaignConfig) -> CampaignConfig:
             key="add_sub_smiles",
             height=160,
         )
-        smiles = [ln.strip() for ln in smiles_text.splitlines() if ln.strip()]
+        smiles = _normalize_smiles_input(smiles_text.splitlines())
         from baybe.parameters.enum import SubstanceEncoding
         enc_options = [e.name for e in SubstanceEncoding]
         encoding = st.selectbox(
@@ -631,7 +647,11 @@ def render_init_page(workdir: Path) -> None:
             plan0 = sobol_initial_design(cfg.parameters, n=cfg.n_init, seed=seed)
             out_path = run_plan_path(workdir, run_idx=0)
             plan0.to_csv(out_path, index=False)
-            campaign = build_campaign(cfg)
+            try:
+                campaign = build_campaign(cfg)
+            except Exception as exc:
+                st.error(f"Campaign initialization failed: {exc}")
+                return
             save_text(latest, campaign.to_json())
             st.success(f"Wrote {out_path} and initialized campaign JSON at {latest}")
             _download_button_df("Download run0.csv", plan0, "run0.csv")
@@ -643,7 +663,11 @@ def render_init_page(workdir: Path) -> None:
             df = pd.read_csv(up)
             st.dataframe(df.head(20), use_container_width=True)
             if st.button("Initialize from this CSV"):
-                campaign = build_campaign(cfg)
+                try:
+                    campaign = build_campaign(cfg)
+                except Exception as exc:
+                    st.error(f"Campaign initialization failed: {exc}")
+                    return
                 needed = [p.name for p in cfg.parameters] + [cfg.objective_target]
                 missing = [c for c in needed if c not in df.columns]
                 if missing:
