@@ -16,37 +16,56 @@ The interface is built with **Streamlit**, so you can use it from a browser with
 
 ## 2) Installation
 
-### Step A: Install Python
-1. Install Python 3.10+ from [python.org](https://www.python.org/downloads/).
-2. Confirm installation in a terminal:
+### Step A (recommended): Install Anaconda
+Using Anaconda is the recommended way to run this app because it gives you an isolated, reproducible Python environment without manually managing system Python.
+
+1. Download Anaconda from the official installer page: [Anaconda Distribution](https://www.anaconda.com/download).
+2. Run the installer for your operating system.
+3. Open a terminal (**Anaconda Prompt** on Windows, Terminal on macOS/Linux).
+4. Confirm Conda is available:
+
+```bash
+conda --version
+```
+
+### Step B: Create and activate a dedicated Conda environment
+From any terminal location, create a new environment with a supported Python version:
+
+```bash
+conda create -n alpine-gp python=3.10 -y
+```
+
+Activate it:
+
+- **Windows (Anaconda Prompt / PowerShell with Conda initialized)**
+```bash
+conda activate alpine-gp
+```
+
+- **macOS/Linux**
+```bash
+conda activate alpine-gp
+```
+
+Optional sanity check:
 
 ```bash
 python --version
 ```
 
-### Step B (recommended): Create a virtual environment
-From inside the `alpine_GP_app` folder:
+### Step C: Install project dependencies
+Navigate to the app folder and install requirements into the active Conda environment:
 
 ```bash
-python -m venv .venv
-```
-
-Activate it:
-
-- **Windows (PowerShell)**
-```bash
-.\.venv\Scripts\Activate.ps1
-```
-
-- **macOS/Linux**
-```bash
-source .venv/bin/activate
-```
-
-### Step C: Install dependencies
-
-```bash
+cd alpine_GP_app
 pip install -r requirements.txt
+```
+
+### Step D: Re-activate the environment in future sessions
+Whenever you open a new terminal, activate the same environment before running the app:
+
+```bash
+conda activate alpine-gp
 ```
 
 ---
