@@ -26,7 +26,29 @@ from .schema import (
 )
 
 
+def _unique_in_order(values: List[str]) -> List[str]:
+    seen: set[str] = set()
+    unique: List[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
+
+
+def validate_parameter_specs(specs: List[ParameterSpec]) -> None:
+    for s in specs:
+        if isinstance(s, SubstanceSpec):
+            unique_smiles = _unique_in_order([sm.strip() for sm in s.smiles if sm.strip()])
+            if len(unique_smiles) < 2:
+                raise ValueError(
+                    f"Substance parameter '{s.name}' needs at least 2 unique SMILES entries; "
+                    f"got {len(unique_smiles)}."
+                )
+
+
 def build_parameters(specs: List[ParameterSpec]):
+    validate_parameter_specs(specs)
     params = []
 
     for s in specs:
@@ -65,10 +87,11 @@ def build_parameters(specs: List[ParameterSpec]):
 
         elif isinstance(s, SubstanceSpec):
             enc = SubstanceEncoding[s.encoding]
+            unique_smiles = _unique_in_order([sm.strip() for sm in s.smiles if sm.strip()])
             params.append(
                 SubstanceParameter(
                     name=s.name,
-                    data={sm: sm for sm in s.smiles},
+                    data={sm: sm for sm in unique_smiles},
                     encoding=enc,
                 )
             )

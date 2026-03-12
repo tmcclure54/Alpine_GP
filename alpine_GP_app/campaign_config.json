@@ -1,0 +1,48 @@
+{
+  "campaign_name": "Test",
+  "objective_target": "yield",
+  "objective_mode": "maximize",
+  "batch_size": 8,
+  "init_mode": "sobol",
+  "n_init": 8,
+  "acquisition": "qExpectedImprovement",
+  "acquisition_kwargs": {
+    "best_f": null
+  },
+  "parameters": [
+    {
+      "name": "solvent",
+      "values": [
+        "MeCN",
+        "HFIP",
+        "THF",
+        "PhMe",
+        "EtOAc"
+      ],
+      "encoding": "OHE",
+      "_type": "CategoricalSpec"
+    },
+    {
+      "name": "reaction_time",
+      "values": [
+        1.0,
+        2.0,
+        3.0,
+        5.0,
+        12.0,
+        24.0
+      ],
+      "unit": "h",
+      "_type": "NumericalDiscreteSpec"
+    },
+    {
+      "name": "Photocatalyst",
+      "smiles": [
+        "4CzIPN, 3CzClIPN, 4CzTPN, TPTBF4, 4CzPN, 4DPAIPN, 2CzPN, 3DPA2FBN, IrF, IrdFMeppydtbbpy, Rubpy, IrdFppyditbubpy, facIrppy3, facIrdFppy3"
+      ],
+      "encoding": "MORDRED",
+      "decorrelate": true,
+      "_type": "SubstanceSpec"
+    }
+  ]
+}

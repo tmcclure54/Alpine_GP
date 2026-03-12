@@ -14,7 +14,7 @@ from core.schema import (
     CategoricalSpec,
     SubstanceSpec,
 )
-from core.baybe_factory import build_campaign
+from core.baybe_factory import build_campaign, validate_parameter_specs
 from core.persistence import (
     ensure_campaign_dirs,
     campaign_latest_path,
@@ -103,6 +103,14 @@ def _json_download_button(label: str, obj: Any, filename: str) -> None:
         file_name=filename,
         mime="application/json",
     )
+
+
+def _config_validation_errors(cfg: CampaignConfig) -> List[str]:
+    try:
+        validate_parameter_specs(cfg.parameters)
+    except ValueError as exc:
+        return [str(exc)]
+    return []
 
 
 def _default_config() -> CampaignConfig:
@@ -436,6 +444,9 @@ def render_config_page(workdir: Path) -> None:
 
     st.divider()
     st.session_state["config"] = cfg.to_dict()
+    validation_errors = _config_validation_errors(cfg)
+    for msg in validation_errors:
+        st.error(msg)
     cfg_path = workdir / "campaign_config.json"
 
     colA, colB = st.columns([1, 1])
@@ -571,11 +582,17 @@ def render_add_parameter(cfg: CampaignConfig) -> CampaignConfig:
             key="add_sub_decor",
         )
         if st.button("Add substance", key="btn_add_sub"):
-            if not smiles:
-                st.error("Please enter at least one SMILES.")
+            unique_smiles = list(dict.fromkeys(smiles))
+            if len(unique_smiles) < 2:
+                st.error("Please enter at least two unique SMILES for a substance parameter.")
             else:
                 cfg.parameters.append(
-                    SubstanceSpec(name=pname, smiles=smiles, encoding=encoding, decorrelate=(decorrelate == "True"))
+                    SubstanceSpec(
+                        name=pname,
+                        smiles=unique_smiles,
+                        encoding=encoding,
+                        decorrelate=(decorrelate == "True"),
+                    )
                 )
                 st.session_state["config"] = cfg.to_dict()
                 st.success(f"Added {pname}")
@@ -588,6 +605,12 @@ def render_add_parameter(cfg: CampaignConfig) -> CampaignConfig:
 def render_init_page(workdir: Path) -> None:
     st.subheader("2) Initialize campaign")
     cfg = CampaignConfig.from_dict(st.session_state["config"])
+    validation_errors = _config_validation_errors(cfg)
+    if validation_errors:
+        for msg in validation_errors:
+            st.error(msg)
+        st.info("Fix the campaign configuration on the Configure page before initializing.")
+        return
     st.info(
         "Initialization writes an initial plan (run0.csv) and persists a BayBE campaign JSON. "
         "Choose Sobol init for a cold start, or ingest an existing CSV for a warm start."
