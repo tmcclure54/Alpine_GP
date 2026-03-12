@@ -861,6 +861,8 @@ def render_init_page(workdir: Path) -> None:
                 if target_error:
                     st.error(target_error)
                     return
+                _normalize_campaign_searchspace_for_matching(campaign)
+                df0 = _ensure_numpy_backed_dataframe(df0)
                 campaign.add_measurements(df0)
                 save_text(latest, campaign.to_json())
                 init_path = workdir / "results" / "initial_data_results.csv"
@@ -943,6 +945,31 @@ def _validate_fraction_target(df: pd.DataFrame, target_col: str) -> Optional[str
             "Enter yields as fractions (0–1). Example: 0.63 for 63% yield."
         )
     return None
+
+
+def _ensure_numpy_backed_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with extension-array columns cast to NumPy/object-backed dtypes.
+
+    BayBE's fuzzy row matcher indexes column `.values` as 2D NumPy arrays. Arrow-backed
+    extension dtypes can raise `IndexError: too many indices for array` in that path.
+    """
+    out = df.copy()
+    for col in out.columns:
+        col_data = out[col]
+        if pd.api.types.is_extension_array_dtype(col_data.dtype):
+            if pd.api.types.is_numeric_dtype(col_data.dtype):
+                out[col] = pd.to_numeric(col_data, errors="coerce")
+            else:
+                out[col] = col_data.astype("object")
+    return out
+
+
+def _normalize_campaign_searchspace_for_matching(campaign) -> None:
+    """Ensure BayBE's internal discrete representation is NumPy/object-backed."""
+    discrete = getattr(getattr(campaign, "searchspace", None), "discrete", None)
+    exp_rep = getattr(discrete, "exp_rep", None)
+    if isinstance(exp_rep, pd.DataFrame):
+        discrete.exp_rep = _ensure_numpy_backed_dataframe(exp_rep)
 
 
 def render_ingest_page(workdir: Path) -> None:
@@ -1032,6 +1059,8 @@ def _ingest_df_and_persist(workdir: Path, cfg: CampaignConfig, campaign, df: pd.
     out_path = run_results_path(workdir, run_idx)
     df_use.to_csv(out_path, index=False)
     append_all_runs(workdir, df_use, run_idx=run_idx)
+    _normalize_campaign_searchspace_for_matching(campaign)
+    df_use = _ensure_numpy_backed_dataframe(df_use)
     campaign.add_measurements(df_use)
 
     latest = campaign_latest_path(workdir, cfg.campaign_name)
