@@ -1,7 +1,4 @@
-import base64
 import json
-import pickle
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -19,12 +16,13 @@ from core.schema import (
 )
 from core.baybe_factory import (
     acquisition_supports_beta,
-    build_campaign,
     default_acquisition_name,
     supported_acquisition_names,
+    supported_substance_encodings,
     validate_campaign_config,
     validate_config_payload,
 )
+from core.campaign_engine import create_campaign_engine, extract_saved_campaign_metadata, load_campaign_engine
 from core.persistence import (
     ensure_campaign_dirs,
     campaign_latest_path,
@@ -115,43 +113,6 @@ def _json_download_button(label: str, obj: Any, filename: str) -> None:
         file_name=filename,
         mime="application/json",
     )
-
-
-def _load_cached_recommendation_info(path: Path) -> Optional[Dict[str, Any]]:
-    raw = json.loads(load_text(path))
-    blob = raw.get("cached_recommendation")
-    if not isinstance(blob, str) or not blob:
-        return None
-
-    batch_index = raw.get("n_batches_done")
-    try:
-        batch_index = int(batch_index)
-    except (TypeError, ValueError):
-        batch_index = None
-
-    try:
-        df = pickle.loads(base64.b64decode(blob))
-    except Exception as exc:
-        return {
-            "dataframe": None,
-            "batch_index": batch_index,
-            "decode_error": str(exc),
-        }
-
-    if not isinstance(df, pd.DataFrame):
-        return {
-            "dataframe": None,
-            "batch_index": batch_index,
-            "decode_error": f"Unsupported cached recommendation type: {type(df).__name__}",
-        }
-
-    return {
-        "dataframe": df.reset_index(drop=True),
-        "batch_index": batch_index,
-        "decode_error": None,
-    }
-
-
 def _normalize_smiles_input(lines: List[str]) -> List[str]:
     normalized: List[str] = []
     for line in lines:
@@ -170,59 +131,8 @@ def _normalize_smiles_input(lines: List[str]) -> List[str]:
 
 def _config_validation_errors(cfg: CampaignConfig) -> List[str]:
     return validate_campaign_config(cfg)
-
-
-def _campaign_name_from_path(path: Path) -> str:
-    stem = path.stem
-    return stem[:-7] if stem.endswith("_latest") else stem
-
-
 def _extract_campaign_metadata(path: Path) -> Dict[str, Any]:
-    """Read lightweight metadata from a persisted BayBE campaign JSON."""
-    raw = json.loads(load_text(path))
-    objective = raw.get("objective", {}) or {}
-    target = objective.get("target", {}) or {}
-    recommender = raw.get("recommender", {}) or {}
-    acquisition = (recommender.get("acquisition_function", {}) or {}).get("type")
-
-    param_meta: List[Dict[str, Any]] = []
-    searchspace = raw.get("searchspace", {}) or {}
-    for p in (searchspace.get("discrete", {}) or {}).get("parameters", []) or []:
-        param_meta.append(
-            {
-                "name": p.get("name"),
-                "type": p.get("type", "unknown"),
-                "values": p.get("values") or p.get("active_values") or p.get("data"),
-            }
-        )
-    for p in (searchspace.get("continuous", {}) or {}).get("parameters", []) or []:
-        param_meta.append(
-            {
-                "name": p.get("name"),
-                "type": p.get("type", "NumericalContinuousParameter"),
-                "values": p.get("bounds"),
-            }
-        )
-
-    completed_measurements = 0
-    try:
-        from baybe.campaign import Campaign
-
-        completed_measurements = int(Campaign.from_json(load_text(path)).measurements.shape[0])
-    except Exception:
-        completed_measurements = -1
-
-    return {
-        "path": path,
-        "campaign_name": _campaign_name_from_path(path),
-        "objective_target": target.get("name", "unknown"),
-        "objective_mode": "minimize" if target.get("minimize") else "maximize",
-        "acquisition": acquisition,
-        "parameter_names": [p["name"] for p in param_meta if p.get("name")],
-        "parameters": param_meta,
-        "completed_measurements": completed_measurements,
-        "last_modified": datetime.fromtimestamp(path.stat().st_mtime),
-    }
+    return extract_saved_campaign_metadata(path)
 
 
 def _discover_campaigns(workdir: Path) -> List[Dict[str, Any]]:
@@ -397,13 +307,9 @@ def _load_config_for_campaign(workdir: Path, meta: Dict[str, Any]) -> CampaignCo
 
 
 def _activate_campaign(workdir: Path, selected: Dict[str, Any]) -> None:
-    from baybe.campaign import Campaign
-
     _clear_config_widget_state()
-    st.session_state["campaign"] = Campaign.from_json(load_text(selected["path"]))
     st.session_state["campaign_name"] = selected["campaign_name"]
     st.session_state["active_campaign_path"] = str(selected["path"])
-    st.session_state["active_campaign_meta"] = selected
     st.session_state["config"] = _load_config_for_campaign(workdir, selected).to_dict()
 
 
@@ -412,7 +318,7 @@ def _reset_to_new_campaign() -> None:
     cfg = _default_config()
     st.session_state["config"] = cfg.to_dict()
     st.session_state["campaign_name"] = cfg.campaign_name
-    for key in ["campaign", "active_campaign_path", "active_campaign_meta"]:
+    for key in ["active_campaign_path"]:
         st.session_state.pop(key, None)
 
 
@@ -854,8 +760,7 @@ def render_parameter_editor(p: ParameterSpec) -> ParameterSpec:
         )
         smiles = _normalize_smiles_input(smiles_text.splitlines())
 
-        from baybe.parameters.enum import SubstanceEncoding
-        enc_options = [e.name for e in SubstanceEncoding]
+        enc_options = supported_substance_encodings()
         default_enc = p.encoding or "MORDRED"
         enc_index = enc_options.index(default_enc) if default_enc in enc_options else 0
         encoding = st.selectbox(
@@ -925,8 +830,7 @@ def render_add_parameter(cfg: CampaignConfig) -> CampaignConfig:
             height=160,
         )
         smiles = _normalize_smiles_input(smiles_text.splitlines())
-        from baybe.parameters.enum import SubstanceEncoding
-        enc_options = [e.name for e in SubstanceEncoding]
+        enc_options = supported_substance_encodings()
         encoding = st.selectbox(
             "Substance encoding",
             options=enc_options,
@@ -991,16 +895,14 @@ def render_init_page(workdir: Path) -> None:
             out_path = run_plan_path(workdir, run_idx=0)
             plan0.to_csv(out_path, index=False)
             try:
-                campaign = build_campaign(cfg)
+                engine = create_campaign_engine(cfg)
             except Exception as exc:
                 st.error(f"Campaign initialization failed: {exc}")
                 return
-            save_text(latest, campaign.to_json())
+            engine.save(latest)
             _persist_campaign_config(workdir, cfg)
-            st.session_state["campaign"] = campaign
             st.session_state["campaign_name"] = cfg.campaign_name
             st.session_state["active_campaign_path"] = str(latest)
-            st.session_state["active_campaign_meta"] = _extract_campaign_metadata(latest)
             st.success(f"Wrote {out_path} and initialized campaign JSON at {latest}")
             _download_button_df("Download run0.csv", plan0, "run0.csv")
 
@@ -1015,7 +917,7 @@ def render_init_page(workdir: Path) -> None:
             st.dataframe(df.head(20), use_container_width=True)
             if st.button("Initialize from this CSV", disabled=not config_is_compatible):
                 try:
-                    campaign = build_campaign(cfg)
+                    engine = create_campaign_engine(cfg)
                 except Exception as exc:
                     st.error(f"Campaign initialization failed: {exc}")
                     return
@@ -1029,15 +931,15 @@ def render_init_page(workdir: Path) -> None:
                 if target_error:
                     st.error(target_error)
                     return
-                _normalize_campaign_searchspace_for_matching(campaign)
-                df0 = _ensure_numpy_backed_dataframe(df0)
-                campaign.add_measurements(df0)
-                save_text(latest, campaign.to_json())
+                try:
+                    df0 = engine.ingest(df0)
+                except ValueError as exc:
+                    st.error(f"Campaign initialization failed: {exc}")
+                    return
+                engine.save(latest)
                 _persist_campaign_config(workdir, cfg)
-                st.session_state["campaign"] = campaign
                 st.session_state["campaign_name"] = cfg.campaign_name
                 st.session_state["active_campaign_path"] = str(latest)
-                st.session_state["active_campaign_meta"] = _extract_campaign_metadata(latest)
                 init_path = workdir / "results" / "initial_data_results.csv"
                 df0.to_csv(init_path, index=False)
                 append_all_runs(workdir, df0, run_idx=-1)
@@ -1060,12 +962,10 @@ def render_recommend_page(workdir: Path) -> None:
         return
     config_is_compatible = _check_campaign_config_compatibility(cfg, workdir)
 
-    from baybe.campaign import Campaign
-
-    campaign = Campaign.from_json(load_text(latest))
+    engine = load_campaign_engine(latest, cfg)
     param_cols = [p.name for p in cfg.parameters]
     measured = measured_keys(workdir, param_cols)
-    active_info = _load_cached_recommendation_info(latest)
+    active_info = engine.cached_recommendation_info()
     active_df: Optional[pd.DataFrame] = None
     active_batch_index: Optional[int] = None
     allow_new_batch = True
@@ -1128,7 +1028,7 @@ def render_recommend_page(workdir: Path) -> None:
 
         while needed > 0 and attempts < max_attempts:
             attempts += 1
-            rec = campaign.recommend(batch_size=needed)
+            rec = engine.recommend(batch_size=needed)
             rec2 = drop_measured(rec, keys, param_cols)
             if rec2.empty:
                 continue
@@ -1151,9 +1051,9 @@ def render_recommend_page(workdir: Path) -> None:
 
         out_path = run_plan_path(workdir, run_idx=next_run)
         rec_final.to_csv(out_path, index=False)
-        save_text(latest, campaign.to_json())
+        engine.save(latest)
         snap = campaign_snapshot_path(workdir, cfg.campaign_name, tag=f"after_recommend_run{next_run}")
-        save_text(snap, campaign.to_json())
+        engine.save(snap)
         st.success(f"Saved plan -> {out_path}")
         _download_button_df("Download plan CSV", rec_final, f"run{next_run}.csv")
         st.dataframe(rec_final, use_container_width=True)
@@ -1177,31 +1077,6 @@ def _validate_fraction_target(df: pd.DataFrame, target_col: str) -> Optional[str
     return None
 
 
-def _ensure_numpy_backed_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy with extension-array columns cast to NumPy/object-backed dtypes.
-
-    BayBE's fuzzy row matcher indexes column `.values` as 2D NumPy arrays. Arrow-backed
-    extension dtypes can raise `IndexError: too many indices for array` in that path.
-    """
-    out = df.copy()
-    for col in out.columns:
-        col_data = out[col]
-        if pd.api.types.is_extension_array_dtype(col_data.dtype):
-            if pd.api.types.is_numeric_dtype(col_data.dtype):
-                out[col] = pd.to_numeric(col_data, errors="coerce")
-            else:
-                out[col] = col_data.astype("object")
-    return out
-
-
-def _normalize_campaign_searchspace_for_matching(campaign) -> None:
-    """Ensure BayBE's internal discrete representation is NumPy/object-backed."""
-    discrete = getattr(getattr(campaign, "searchspace", None), "discrete", None)
-    exp_rep = getattr(discrete, "exp_rep", None)
-    if isinstance(exp_rep, pd.DataFrame):
-        discrete.exp_rep = _ensure_numpy_backed_dataframe(exp_rep)
-
-
 def render_ingest_page(workdir: Path) -> None:
     st.subheader("4) Ingest results + update campaign")
     cfg = CampaignConfig.from_dict(st.session_state["config"])
@@ -1217,9 +1092,7 @@ def render_ingest_page(workdir: Path) -> None:
         return
     config_is_compatible = _check_campaign_config_compatibility(cfg, workdir)
 
-    from baybe.campaign import Campaign
-
-    campaign = Campaign.from_json(load_text(latest))
+    engine = load_campaign_engine(latest, cfg)
     st.caption(
         "Upload a results CSV (typically a copy of the plan CSV with an extra target column), or point the app to the on-disk results file. "
         "Enter yields as fractions (0–1). Example: 0.63 for 63% yield."
@@ -1235,7 +1108,7 @@ def render_ingest_page(workdir: Path) -> None:
             df = pd.read_csv(up)
             st.dataframe(df.head(20), use_container_width=True)
             if st.button("Ingest uploaded results", disabled=not config_is_compatible):
-                _ingest_df_and_persist(workdir, cfg, campaign, df, run_idx)
+                _ingest_df_and_persist(workdir, cfg, engine, df, run_idx)
     with colB:
         disk_path = run_results_path(workdir, run_idx)
         st.code(str(disk_path))
@@ -1244,11 +1117,11 @@ def render_ingest_page(workdir: Path) -> None:
                 st.error(f"Missing: {disk_path}")
                 st.stop()
             df = pd.read_csv(disk_path)
-            _ingest_df_and_persist(workdir, cfg, campaign, df, run_idx)
+            _ingest_df_and_persist(workdir, cfg, engine, df, run_idx)
 
 
 
-def _ingest_df_and_persist(workdir: Path, cfg: CampaignConfig, campaign, df: pd.DataFrame, run_idx: int) -> None:
+def _ingest_df_and_persist(workdir: Path, cfg: CampaignConfig, engine, df: pd.DataFrame, run_idx: int) -> None:
     param_cols = [p.name for p in cfg.parameters]
     target_col = cfg.objective_target
     missing = [c for c in (param_cols + [target_col]) if c not in df.columns]
@@ -1263,46 +1136,20 @@ def _ingest_df_and_persist(workdir: Path, cfg: CampaignConfig, campaign, df: pd.
         st.error(target_error)
         return
 
-    def _normalize_for_baybe(series: pd.Series, is_numeric: bool) -> pd.Series:
-        # BayBE fuzzy matching uses NumPy-style 2D indexing on `.values`, so we avoid
-        # Arrow-backed extension dtypes and coerce to plain NumPy/object-backed columns.
-        if is_numeric:
-            return pd.to_numeric(series, errors="coerce")
-        return series.astype("object")
-
-    numeric_param_types = (NumericalContinuousSpec, NumericalDiscreteSpec)
-    introduced_nulls: list[str] = []
-    for p in cfg.parameters:
-        before = df_use[p.name]
-        after = _normalize_for_baybe(before, isinstance(p, numeric_param_types))
-        if ((~before.isna()) & after.isna()).any():
-            introduced_nulls.append(p.name)
-        df_use[p.name] = after
-
-    target_before = df_use[target_col]
-    target_after = _normalize_for_baybe(target_before, is_numeric=True)
-    if ((~target_before.isna()) & target_after.isna()).any():
-        introduced_nulls.append(target_col)
-    df_use[target_col] = target_after
-
-    if introduced_nulls:
-        st.error(
-            "Failed to ingest results: datatype normalization introduced nulls in "
-            f"required columns {sorted(set(introduced_nulls))}."
-        )
+    try:
+        df_use = engine.ingest(df_use)
+    except ValueError as exc:
+        st.error(f"Failed to ingest results: {exc}")
         return
 
     out_path = run_results_path(workdir, run_idx)
     df_use.to_csv(out_path, index=False)
     append_all_runs(workdir, df_use, run_idx=run_idx)
-    _normalize_campaign_searchspace_for_matching(campaign)
-    df_use = _ensure_numpy_backed_dataframe(df_use)
-    campaign.add_measurements(df_use)
 
     latest = campaign_latest_path(workdir, cfg.campaign_name)
-    save_text(latest, campaign.to_json())
+    engine.save(latest)
     snap = campaign_snapshot_path(workdir, cfg.campaign_name, tag=f"after_ingest_run{run_idx}")
-    save_text(snap, campaign.to_json())
+    engine.save(snap)
     st.success(f"Ingested {len(df_use)} rows. Saved {out_path} and updated {latest}.")
 
 

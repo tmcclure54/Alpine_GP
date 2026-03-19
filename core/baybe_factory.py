@@ -112,6 +112,11 @@ def acquisition_supports_beta(acquisition_name: str) -> bool:
     return spec is not None and "beta" in spec.supported_kwargs
 
 
+def supported_substance_encodings() -> list[str]:
+    substance_encoding_enum = _load_symbol("baybe.parameters.enum", "SubstanceEncoding")
+    return [member.name for member in substance_encoding_enum]
+
+
 def default_acquisition_name(batch_size: int) -> str:
     supported = supported_acquisition_names(batch_size)
     if "qExpectedImprovement" in supported:
