@@ -29,6 +29,10 @@ def campaign_snapshot_path(workdir: Path, campaign_name: str, tag: str) -> Path:
     return workdir / "campaign_jsons" / f"{campaign_name}_{safe}.json"
 
 
+def campaign_config_path(workdir: Path, campaign_name: str) -> Path:
+    return workdir / "campaign_jsons" / f"{campaign_name}_config.json"
+
+
 def run_plan_path(workdir: Path, run_idx: int) -> Path:
     return workdir / "plans" / f"run{run_idx}.csv"
 

@@ -1,0 +1,9 @@
+solvent,reaction_time,Photocatalyst
+PhMe,2.0,A
+EtOAc,2.0,D
+PhMe,5.0,A
+PhMe,1.0,B
+HFIP,18.0,B
+MeCN,5.0,E
+HFIP,5.0,F
+MeCN,2.0,E

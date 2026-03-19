@@ -1,0 +1,53 @@
+{
+  "campaign_name": "default",
+  "objective_target": "yield",
+  "objective_mode": "maximize",
+  "batch_size": 8,
+  "init_mode": "sobol",
+  "n_init": 20,
+  "acquisition": "qNoisyExpectedImprovement",
+  "acquisition_kwargs": {},
+  "parameters": [
+    {
+      "name": "solvent",
+      "values": [
+        "MeCN",
+        "HFIP",
+        "THF",
+        "PhMe",
+        "EtOAc"
+      ],
+      "encoding": "OHE",
+      "_type": "CategoricalSpec"
+    },
+    {
+      "name": "reaction_time",
+      "values": [
+        1.0,
+        2.0,
+        3.0,
+        5.0,
+        12.0,
+        18.0,
+        24.0
+      ],
+      "unit": "h",
+      "_type": "NumericalDiscreteSpec"
+    },
+    {
+      "name": "Photocatalyst",
+      "values": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F",
+        "G",
+        "H"
+      ],
+      "encoding": "OHE",
+      "_type": "CategoricalSpec"
+    }
+  ]
+}
