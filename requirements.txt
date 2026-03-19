@@ -6,4 +6,4 @@ matplotlib>=3.7
 baybe
 botorch
 torch
-rdkit-pypi
+rdkit

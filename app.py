@@ -1,4 +1,6 @@
+import base64
 import json
+import pickle
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -20,6 +22,7 @@ from core.persistence import (
     ensure_campaign_dirs,
     campaign_latest_path,
     campaign_snapshot_path,
+    campaign_config_path,
     run_plan_path,
     run_results_path,
     all_runs_path,
@@ -107,6 +110,41 @@ def _json_download_button(label: str, obj: Any, filename: str) -> None:
     )
 
 
+def _load_cached_recommendation_info(path: Path) -> Optional[Dict[str, Any]]:
+    raw = json.loads(load_text(path))
+    blob = raw.get("cached_recommendation")
+    if not isinstance(blob, str) or not blob:
+        return None
+
+    batch_index = raw.get("n_batches_done")
+    try:
+        batch_index = int(batch_index)
+    except (TypeError, ValueError):
+        batch_index = None
+
+    try:
+        df = pickle.loads(base64.b64decode(blob))
+    except Exception as exc:
+        return {
+            "dataframe": None,
+            "batch_index": batch_index,
+            "decode_error": str(exc),
+        }
+
+    if not isinstance(df, pd.DataFrame):
+        return {
+            "dataframe": None,
+            "batch_index": batch_index,
+            "decode_error": f"Unsupported cached recommendation type: {type(df).__name__}",
+        }
+
+    return {
+        "dataframe": df.reset_index(drop=True),
+        "batch_index": batch_index,
+        "decode_error": None,
+    }
+
+
 def _normalize_smiles_input(lines: List[str]) -> List[str]:
     normalized: List[str] = []
     for line in lines:
@@ -141,6 +179,8 @@ def _extract_campaign_metadata(path: Path) -> Dict[str, Any]:
     raw = json.loads(load_text(path))
     objective = raw.get("objective", {}) or {}
     target = objective.get("target", {}) or {}
+    recommender = raw.get("recommender", {}) or {}
+    acquisition = (recommender.get("acquisition_function", {}) or {}).get("type")
 
     param_meta: List[Dict[str, Any]] = []
     searchspace = raw.get("searchspace", {}) or {}
@@ -174,6 +214,7 @@ def _extract_campaign_metadata(path: Path) -> Dict[str, Any]:
         "campaign_name": _campaign_name_from_path(path),
         "objective_target": target.get("name", "unknown"),
         "objective_mode": "minimize" if target.get("minimize") else "maximize",
+        "acquisition": acquisition,
         "parameter_names": [p["name"] for p in param_meta if p.get("name")],
         "parameters": param_meta,
         "completed_measurements": completed_measurements,
@@ -270,21 +311,7 @@ def _render_campaign_browser(workdir: Path) -> None:
     )
 
     if st.sidebar.button("Load selected campaign"):
-        from baybe.campaign import Campaign
-
-        st.session_state["campaign"] = Campaign.from_json(load_text(selected["path"]))
-        st.session_state["campaign_name"] = selected["campaign_name"]
-        st.session_state["active_campaign_path"] = str(selected["path"])
-        st.session_state["active_campaign_meta"] = selected
-
-        cfg = CampaignConfig.from_dict(st.session_state["config"])
-        cfg.campaign_name = selected["campaign_name"]
-        cfg.objective_target = selected["objective_target"]
-        cfg.objective_mode = selected["objective_mode"]
-        inferred_specs = _build_specs_from_metadata(selected)
-        if inferred_specs:
-            cfg.parameters = inferred_specs
-        st.session_state["config"] = cfg.to_dict()
+        _activate_campaign(workdir, selected)
         st.success(f"Loaded campaign '{selected['campaign_name']}'.")
         st.rerun()
 
@@ -318,6 +345,72 @@ def _default_config() -> CampaignConfig:
             NumericalDiscreteSpec(name="reaction_time", values=[1.0, 2.0, 3.0], unit="h"),
         ],
     )
+
+
+def _persist_campaign_config(workdir: Path, cfg: CampaignConfig) -> Path:
+    path = campaign_config_path(workdir, cfg.campaign_name)
+    save_text(path, json.dumps(cfg.to_dict(), indent=2))
+    return path
+
+
+def _clear_config_widget_state() -> None:
+    prefixes = (
+        "cfg_",
+        "pname_",
+        "lo_",
+        "hi_",
+        "unit_",
+        "vals_",
+        "cats_",
+        "enc_",
+        "smiles_",
+        "senc_",
+        "decor_",
+    )
+    for key in list(st.session_state.keys()):
+        if any(key.startswith(prefix) for prefix in prefixes):
+            st.session_state.pop(key, None)
+
+
+def _load_config_for_campaign(workdir: Path, meta: Dict[str, Any]) -> CampaignConfig:
+    path = campaign_config_path(workdir, meta["campaign_name"])
+    if path.exists():
+        try:
+            return CampaignConfig.from_dict(json.loads(load_text(path)))
+        except Exception:
+            pass
+
+    cfg = _default_config()
+    cfg.campaign_name = meta["campaign_name"]
+    cfg.objective_target = meta.get("objective_target", cfg.objective_target)
+    cfg.objective_mode = meta.get("objective_mode", cfg.objective_mode)
+    acquisition = meta.get("acquisition")
+    if acquisition in ACQ_ORDER:
+        cfg.acquisition = acquisition
+    inferred_specs = _build_specs_from_metadata(meta)
+    if inferred_specs:
+        cfg.parameters = inferred_specs
+    return cfg
+
+
+def _activate_campaign(workdir: Path, selected: Dict[str, Any]) -> None:
+    from baybe.campaign import Campaign
+
+    _clear_config_widget_state()
+    st.session_state["campaign"] = Campaign.from_json(load_text(selected["path"]))
+    st.session_state["campaign_name"] = selected["campaign_name"]
+    st.session_state["active_campaign_path"] = str(selected["path"])
+    st.session_state["active_campaign_meta"] = selected
+    st.session_state["config"] = _load_config_for_campaign(workdir, selected).to_dict()
+
+
+def _reset_to_new_campaign() -> None:
+    _clear_config_widget_state()
+    cfg = _default_config()
+    st.session_state["config"] = cfg.to_dict()
+    st.session_state["campaign_name"] = cfg.campaign_name
+    for key in ["campaign", "active_campaign_path", "active_campaign_meta"]:
+        st.session_state.pop(key, None)
 
 
 COLORS = {
@@ -515,6 +608,9 @@ def main() -> None:
     _set_page()
     st.title(APP_TITLE)
 
+    if "config" not in st.session_state:
+        st.session_state["config"] = _default_config().to_dict()
+
     st.sidebar.header("Navigation")
     page = st.sidebar.radio(
         "Go to",
@@ -535,19 +631,30 @@ def main() -> None:
         help="All plans/, results/, campaign_jsons/ will live here.",
     )
     workdir = Path(workdir_str).expanduser().resolve()
-
-    default_campaign = st.session_state.get("campaign_name", "default")
-    campaign_name = st.sidebar.text_input("Campaign name", value=default_campaign)
     ensure_campaign_dirs(workdir)
     _render_campaign_browser(workdir)
 
-    if "config" not in st.session_state:
-        st.session_state["config"] = _default_config().to_dict()
+    cfg = CampaignConfig.from_dict(st.session_state["config"])
+    active_campaign_path = st.session_state.get("active_campaign_path")
+    campaign_name = st.sidebar.text_input(
+        "Campaign name",
+        value=cfg.campaign_name,
+        disabled=bool(active_campaign_path),
+        help=(
+            "Campaign name is locked to the loaded campaign. Select 'Create new campaign' to start a fresh configuration."
+            if active_campaign_path
+            else "Name for the campaign configuration you are editing."
+        ),
+    )
+
+    if active_campaign_path and st.sidebar.button("Create new campaign"):
+        _reset_to_new_campaign()
+        st.rerun()
 
     st.session_state["campaign_name"] = campaign_name
     st.session_state["config"]["campaign_name"] = campaign_name
 
-    if st.session_state.get("active_campaign_path"):
+    if active_campaign_path:
         st.sidebar.success(f"Active campaign: {st.session_state.get('campaign_name', campaign_name)}")
 
     if page.startswith("1"):
@@ -569,34 +676,58 @@ def render_config_page(workdir: Path) -> None:
     st.subheader("1) Configure parameters + model settings")
     cfg = CampaignConfig.from_dict(st.session_state["config"])
 
+    if st.session_state.get("active_campaign_path"):
+        st.info(
+            "This form is populated from the loaded campaign configuration. "
+            "Use 'Create new campaign' to reset the editor and start a different campaign."
+        )
+        if st.button("Create new campaign", key="create_new_campaign_config"):
+            _reset_to_new_campaign()
+            st.rerun()
+
     colL, colR = st.columns([1, 1])
 
     with colL:
         st.markdown("### Objective")
-        cfg.objective_target = st.text_input("Target column name", value=cfg.objective_target)
+        cfg.objective_target = st.text_input("Target column name", value=cfg.objective_target, key="cfg_objective_target")
         cfg.objective_mode = st.selectbox(
             "Optimize direction",
             options=["maximize", "minimize"],
             index=0 if cfg.objective_mode == "maximize" else 1,
+            key="cfg_objective_mode",
         )
 
         st.markdown("### Batch")
-        cfg.batch_size = int(st.number_input("Batch size", min_value=1, value=int(cfg.batch_size), step=1))
+        cfg.batch_size = int(st.number_input("Batch size", min_value=1, value=int(cfg.batch_size), step=1, key="cfg_batch_size"))
 
         st.markdown("### Initialization")
-        cfg.init_mode = st.selectbox("Init mode", ["sobol", "existing_data"], index=0 if cfg.init_mode == "sobol" else 1)
-        cfg.n_init = int(st.number_input("# init points", min_value=0, value=int(cfg.n_init), step=1))
+        cfg.init_mode = st.selectbox(
+            "Init mode",
+            ["sobol", "existing_data"],
+            index=0 if cfg.init_mode == "sobol" else 1,
+            key="cfg_init_mode",
+        )
+        cfg.n_init = int(st.number_input("# init points", min_value=0, value=int(cfg.n_init), step=1, key="cfg_n_init"))
 
     with colR:
         st.markdown("### Acquisition function (BayBE → BoTorch)")
         st.caption("BayBE wrappers are shown here. The plot places them on a practical exploration ↔ exploitation spectrum.")
         current_index = ACQ_ORDER.index(cfg.acquisition) if cfg.acquisition in ACQ_ORDER else ACQ_ORDER.index("qExpectedImprovement")
-        cfg.acquisition = st.selectbox("Acquisition", options=ACQ_ORDER, index=current_index)
+        cfg.acquisition = st.selectbox("Acquisition", options=ACQ_ORDER, index=current_index, key="cfg_acquisition")
 
         if cfg.acquisition in {"UpperConfidenceBound", "qUpperConfidenceBound"}:
             current_beta = float((cfg.acquisition_kwargs or {}).get("beta", 2.0))
-            beta = float(st.slider("UCB beta", min_value=0.1, max_value=10.0, value=current_beta, step=0.1,
-                                   help="Larger beta weights uncertainty more heavily, so the optimizer explores more."))
+            beta = float(
+                st.slider(
+                    "UCB beta",
+                    min_value=0.1,
+                    max_value=10.0,
+                    value=current_beta,
+                    step=0.1,
+                    key="cfg_ucb_beta",
+                    help="Larger beta weights uncertainty more heavily, so the optimizer explores more.",
+                )
+            )
             cfg.acquisition_kwargs = dict(cfg.acquisition_kwargs or {})
             cfg.acquisition_kwargs["beta"] = beta
         else:
@@ -610,7 +741,7 @@ def render_config_page(workdir: Path) -> None:
 
         with st.expander("Advanced acquisition kwargs"):
             st.caption("Optional JSON passed to the BayBE acquisition wrapper. Leave empty to use defaults.")
-            kw_text = st.text_area("", value=json.dumps(cfg.acquisition_kwargs or {}, indent=2), height=140)
+            kw_text = st.text_area("", value=json.dumps(cfg.acquisition_kwargs or {}, indent=2), height=140, key="cfg_acq_kwargs")
             try:
                 cfg.acquisition_kwargs = json.loads(kw_text) if kw_text.strip() else {}
             except json.JSONDecodeError as e:
@@ -638,10 +769,11 @@ def render_config_page(workdir: Path) -> None:
 
     with param_tabs[2]:
         st.caption("This is the persisted config. Editing here overwrites the form values.")
-        raw = st.text_area("CampaignConfig JSON", value=json.dumps(cfg.to_dict(), indent=2), height=320)
+        raw = st.text_area("CampaignConfig JSON", value=json.dumps(cfg.to_dict(), indent=2), height=320, key="cfg_raw_json")
         if st.button("Load JSON into editor"):
             try:
                 st.session_state["config"] = json.loads(raw)
+                _clear_config_widget_state()
                 st.success("Loaded.")
                 st.rerun()
             except json.JSONDecodeError as e:
@@ -658,6 +790,7 @@ def render_config_page(workdir: Path) -> None:
     with colA:
         if st.button("Save config to disk"):
             save_text(cfg_path, json.dumps(cfg.to_dict(), indent=2))
+            _persist_campaign_config(workdir, cfg)
             st.success(f"Saved {cfg_path}")
     with colB:
         _json_download_button("Download config JSON", cfg.to_dict(), "campaign_config.json")
@@ -843,6 +976,11 @@ def render_init_page(workdir: Path) -> None:
                 st.error(f"Campaign initialization failed: {exc}")
                 return
             save_text(latest, campaign.to_json())
+            _persist_campaign_config(workdir, cfg)
+            st.session_state["campaign"] = campaign
+            st.session_state["campaign_name"] = cfg.campaign_name
+            st.session_state["active_campaign_path"] = str(latest)
+            st.session_state["active_campaign_meta"] = _extract_campaign_metadata(latest)
             st.success(f"Wrote {out_path} and initialized campaign JSON at {latest}")
             _download_button_df("Download run0.csv", plan0, "run0.csv")
 
@@ -875,6 +1013,11 @@ def render_init_page(workdir: Path) -> None:
                 df0 = _ensure_numpy_backed_dataframe(df0)
                 campaign.add_measurements(df0)
                 save_text(latest, campaign.to_json())
+                _persist_campaign_config(workdir, cfg)
+                st.session_state["campaign"] = campaign
+                st.session_state["campaign_name"] = cfg.campaign_name
+                st.session_state["active_campaign_path"] = str(latest)
+                st.session_state["active_campaign_meta"] = _extract_campaign_metadata(latest)
                 init_path = workdir / "results" / "initial_data_results.csv"
                 df0.to_csv(init_path, index=False)
                 append_all_runs(workdir, df0, run_idx=-1)
@@ -894,13 +1037,64 @@ def render_recommend_page(workdir: Path) -> None:
     from baybe.campaign import Campaign
 
     campaign = Campaign.from_json(load_text(latest))
+    param_cols = [p.name for p in cfg.parameters]
+    measured = measured_keys(workdir, param_cols)
+    active_info = _load_cached_recommendation_info(latest)
+    active_df: Optional[pd.DataFrame] = None
+    active_batch_index: Optional[int] = None
+    allow_new_batch = True
+
+    if active_info is not None:
+        active_batch_index = active_info.get("batch_index")
+        decoded_df = active_info.get("dataframe")
+        decode_error = active_info.get("decode_error")
+        if isinstance(decoded_df, pd.DataFrame):
+            active_df = drop_measured(decoded_df, measured, param_cols)
+            if active_df.empty:
+                active_df = None
+            else:
+                active_name = (
+                    f"run{active_batch_index}.csv"
+                    if isinstance(active_batch_index, int) and active_batch_index >= 0
+                    else f"{cfg.campaign_name}_active_batch.csv"
+                )
+                st.info(
+                    "Loaded campaign JSON already contains an active recommended batch. "
+                    "Re-download that batch below unless you intentionally want to advance to a new batch."
+                )
+                st.markdown(f"Active batch in saved campaign: **{active_name}**")
+                st.caption(
+                    "The configured batch size applies per recommendation call. "
+                    "Requesting another batch before ingesting results creates additional pending experiments."
+                )
+                _download_button_df("Download active batch CSV", active_df, active_name)
+                st.dataframe(active_df, use_container_width=True)
+                allow_new_batch = st.checkbox(
+                    "Generate a new batch instead of reusing the active batch",
+                    value=False,
+                    key=f"allow_new_batch_{cfg.campaign_name}",
+                )
+        elif decode_error:
+            st.warning(
+                "This campaign JSON appears to contain a cached recommendation, "
+                f"but it could not be decoded in the current environment: {decode_error}"
+            )
+            allow_new_batch = st.checkbox(
+                "Generate a new batch anyway",
+                value=False,
+                key=f"allow_new_batch_{cfg.campaign_name}",
+            )
+
     next_run = discover_next_run_idx(workdir)
-    st.markdown(f"Next run index: **{next_run}**")
+    st.markdown(f"Next new run index: **{next_run}**")
     st.caption("This writes plans/runN.csv and snapshots the campaign state after recommendation.")
 
-    if st.button("Recommend batch", disabled=not config_is_compatible):
-        param_cols = [p.name for p in cfg.parameters]
-        keys = measured_keys(workdir, param_cols)
+    button_label = "Recommend batch" if active_df is None else "Recommend another batch"
+    if st.button(button_label, disabled=(not config_is_compatible) or (not allow_new_batch)):
+        keys = set(measured)
+        if active_df is not None:
+            for row in active_df[[c for c in param_cols if c in active_df.columns]].itertuples(index=False, name=None):
+                keys.add(tuple(row))
         needed = int(cfg.batch_size)
         collected: List[pd.DataFrame] = []
         attempts = 0
