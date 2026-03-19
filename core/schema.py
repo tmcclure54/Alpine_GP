@@ -86,7 +86,7 @@ class CampaignConfig:
     parameters: List[ParameterSpec] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "campaign_name": self.campaign_name,
             "objective_target": self.objective_target,
             "objective_mode": self.objective_mode,
@@ -94,9 +94,11 @@ class CampaignConfig:
             "init_mode": self.init_mode,
             "n_init": self.n_init,
             "acquisition": self.acquisition,
-            "acquisition_kwargs": self.acquisition_kwargs,
             "parameters": [p.to_dict() for p in self.parameters],
         }
+        if self.acquisition_kwargs:
+            data["acquisition_kwargs"] = self.acquisition_kwargs
+        return data
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "CampaignConfig":
