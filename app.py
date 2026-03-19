@@ -17,7 +17,14 @@ from core.schema import (
     CategoricalSpec,
     SubstanceSpec,
 )
-from core.baybe_factory import build_campaign, validate_parameter_specs
+from core.baybe_factory import (
+    acquisition_supports_beta,
+    build_campaign,
+    default_acquisition_name,
+    supported_acquisition_names,
+    validate_campaign_config,
+    validate_config_payload,
+)
 from core.persistence import (
     ensure_campaign_dirs,
     campaign_latest_path,
@@ -162,11 +169,7 @@ def _normalize_smiles_input(lines: List[str]) -> List[str]:
 
 
 def _config_validation_errors(cfg: CampaignConfig) -> List[str]:
-    try:
-        validate_parameter_specs(cfg.parameters)
-    except ValueError as exc:
-        return [str(exc)]
-    return []
+    return validate_campaign_config(cfg)
 
 
 def _campaign_name_from_path(path: Path) -> str:
@@ -712,10 +715,30 @@ def render_config_page(workdir: Path) -> None:
     with colR:
         st.markdown("### Acquisition function (BayBE → BoTorch)")
         st.caption("BayBE wrappers are shown here. The plot places them on a practical exploration ↔ exploitation spectrum.")
-        current_index = ACQ_ORDER.index(cfg.acquisition) if cfg.acquisition in ACQ_ORDER else ACQ_ORDER.index("qExpectedImprovement")
-        cfg.acquisition = st.selectbox("Acquisition", options=ACQ_ORDER, index=current_index, key="cfg_acquisition")
+        st.caption("Only acquisition functions supported by the current backend and batch size are shown.")
+        available_acquisitions = supported_acquisition_names(int(cfg.batch_size))
+        if int(cfg.batch_size) > 1:
+            st.caption("Batch size > 1 requires batch-compatible acquisition functions (`q...`).")
+        if not available_acquisitions:
+            st.error(f"No acquisition functions are available for batch size {int(cfg.batch_size)}.")
+            return
+        if cfg.acquisition not in available_acquisitions:
+            st.error(
+                f"Configured acquisition '{cfg.acquisition}' is not supported for batch size {int(cfg.batch_size)}. "
+                "Choose one of the supported options below."
+            )
+        cfg.acquisition = st.selectbox(
+            "Acquisition",
+            options=available_acquisitions,
+            index=(
+                available_acquisitions.index(cfg.acquisition)
+                if cfg.acquisition in available_acquisitions
+                else available_acquisitions.index(default_acquisition_name(int(cfg.batch_size)))
+            ),
+            key="cfg_acquisition",
+        )
 
-        if cfg.acquisition in {"UpperConfidenceBound", "qUpperConfidenceBound"}:
+        if acquisition_supports_beta(cfg.acquisition):
             current_beta = float((cfg.acquisition_kwargs or {}).get("beta", 2.0))
             beta = float(
                 st.slider(
@@ -728,24 +751,12 @@ def render_config_page(workdir: Path) -> None:
                     help="Larger beta weights uncertainty more heavily, so the optimizer explores more.",
                 )
             )
-            cfg.acquisition_kwargs = dict(cfg.acquisition_kwargs or {})
-            cfg.acquisition_kwargs["beta"] = beta
+            cfg.acquisition_kwargs = {"beta": beta}
         else:
             beta = None
-            if cfg.acquisition_kwargs is None:
-                cfg.acquisition_kwargs = {}
-            if "beta" in cfg.acquisition_kwargs:
-                cfg.acquisition_kwargs.pop("beta", None)
+            cfg.acquisition_kwargs = {}
 
         _render_acquisition_map(cfg.acquisition, beta)
-
-        with st.expander("Advanced acquisition kwargs"):
-            st.caption("Optional JSON passed to the BayBE acquisition wrapper. Leave empty to use defaults.")
-            kw_text = st.text_area("", value=json.dumps(cfg.acquisition_kwargs or {}, indent=2), height=140, key="cfg_acq_kwargs")
-            try:
-                cfg.acquisition_kwargs = json.loads(kw_text) if kw_text.strip() else {}
-            except json.JSONDecodeError as e:
-                st.error(f"Invalid JSON: {e}")
 
     st.divider()
     st.markdown("### Parameters")
@@ -768,14 +779,23 @@ def render_config_page(workdir: Path) -> None:
         cfg = render_add_parameter(cfg)
 
     with param_tabs[2]:
-        st.caption("This is the persisted config. Editing here overwrites the form values.")
+        st.caption(
+            "This is the persisted config. Editing here overwrites the form values. "
+            "Unsupported keys or unsupported acquisition kwargs are rejected."
+        )
         raw = st.text_area("CampaignConfig JSON", value=json.dumps(cfg.to_dict(), indent=2), height=320, key="cfg_raw_json")
         if st.button("Load JSON into editor"):
             try:
-                st.session_state["config"] = json.loads(raw)
-                _clear_config_widget_state()
-                st.success("Loaded.")
-                st.rerun()
+                payload = json.loads(raw)
+                payload_errors = validate_config_payload(payload)
+                if payload_errors:
+                    for msg in payload_errors:
+                        st.error(msg)
+                else:
+                    st.session_state["config"] = CampaignConfig.from_dict(payload).to_dict()
+                    _clear_config_widget_state()
+                    st.success("Loaded.")
+                    st.rerun()
             except json.JSONDecodeError as e:
                 st.error(f"Invalid JSON: {e}")
 
@@ -1028,6 +1048,12 @@ def render_init_page(workdir: Path) -> None:
 def render_recommend_page(workdir: Path) -> None:
     st.subheader("3) Recommend next batch")
     cfg = CampaignConfig.from_dict(st.session_state["config"])
+    validation_errors = _config_validation_errors(cfg)
+    if validation_errors:
+        for msg in validation_errors:
+            st.error(msg)
+        st.info("Fix the campaign configuration on the Configure page before requesting recommendations.")
+        return
     latest = campaign_latest_path(workdir, cfg.campaign_name)
     if not latest.exists():
         st.error("No campaign JSON found. Go to 'Initialize' first.")
@@ -1179,6 +1205,12 @@ def _normalize_campaign_searchspace_for_matching(campaign) -> None:
 def render_ingest_page(workdir: Path) -> None:
     st.subheader("4) Ingest results + update campaign")
     cfg = CampaignConfig.from_dict(st.session_state["config"])
+    validation_errors = _config_validation_errors(cfg)
+    if validation_errors:
+        for msg in validation_errors:
+            st.error(msg)
+        st.info("Fix the campaign configuration on the Configure page before ingesting results.")
+        return
     latest = campaign_latest_path(workdir, cfg.campaign_name)
     if not latest.exists():
         st.error("No campaign JSON found. Go to 'Initialize' first.")

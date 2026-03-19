@@ -233,3 +233,11 @@ At the top of the tab, users can:
 - Figures are auto-saved as PNG files under `WORKDIR/plots/<campaign_name>/analysis/`.
 - Cleaned dashboard data can be downloaded as CSV.
 - Dashboard summary statistics can be downloaded as JSON.
+
+## AI Development Rules
+
+All AI-assisted development MUST follow:
+- AGENT_PRINCIPLES.md
+- AGENT_ROADMAP.md
+
+Failure to comply results in invalid implementation.

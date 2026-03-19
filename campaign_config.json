@@ -6,7 +6,6 @@
   "init_mode": "sobol",
   "n_init": 20,
   "acquisition": "qNoisyExpectedImprovement",
-  "acquisition_kwargs": {},
   "parameters": [
     {
       "name": "solvent",
