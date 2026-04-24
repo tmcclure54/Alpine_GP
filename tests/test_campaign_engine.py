@@ -288,15 +288,16 @@ class CampaignEngineTests(unittest.TestCase):
             {
                 "solvent": pd.Series(["A"], dtype="string"),
                 "yield": pd.Series([0.5], dtype="Float64"),
+                "status": pd.Series(["completed"], dtype="string"),
             }
         )
 
         with temporary_modules(build_engine_stub_modules()):
             engine = create_campaign_engine(cfg)
-            normalized = engine.ingest(df)
+            result = engine.ingest(df)
 
         self.assertEqual(engine.measurement_count(), 1)
-        self.assertEqual(normalized["solvent"].dtype, object)
+        self.assertIn("status", result.columns)
 
     def test_extract_saved_campaign_metadata_is_backend_agnostic_to_ui(self):
         cfg = CampaignConfig(

@@ -98,7 +98,8 @@ What you should see:
 2. Go to **1) Configure**:
    - define parameter names/types/values,
    - set objective target column (typically `yield`),
-   - set optimization direction (usually maximize).
+   - set optimization direction (usually maximize),
+   - choose the **backend engine** (BayBE or Ax — see Section 10 below).
 3. Go to **2) Initialize**:
    - choose `sobol` or `existing_data` initialization,
    - generate initial experiments.
@@ -128,10 +129,11 @@ The app keeps the loaded campaign in session state and marks it as active.
 ## 6) Entering Experimental Results
 
 Prepare a CSV with:
-- all parameter columns used in the campaign, and
-- the objective column (for example `yield`).
+- all parameter columns used in the campaign,
+- the objective column (for example `yield`), and
+- optionally a `status` column (see below).
 
-Example:
+Minimal example:
 
 ```csv
 solvent,catalyst,temp,yield
@@ -139,8 +141,38 @@ MeCN,A,25,0.63
 HFIP,A,25,0.71
 ```
 
+Example with a status column (recommended for mixed-outcome batches):
+
+```csv
+solvent,catalyst,temp,yield,status
+MeCN,A,25,0.63,completed
+HFIP,A,25,,failed
+EtOH,B,40,0.45,completed
+```
+
+### Trial status (required for every ingestion)
+
+Every row you ingest must have a **trial status**. This determines whether the row is used to update the model.
+
+| Status | Meaning | Used in model? |
+|--------|---------|----------------|
+| `completed` | Valid experimental result | **Yes** |
+| `failed` | Experiment attempted but produced no usable data | No |
+| `abandoned` | Experiment not completed | No |
+| `partial` | Incomplete data | No |
+| `invalid` | Data corrupted or unusable | No |
+
+**How status is assigned on the Ingest Results page:**
+
+- If your CSV already has a `status` column, the app uses those values (you can still edit individual rows in the table shown).
+- If your CSV has no `status` column, a selectbox appears so you can assign a status to all rows at once. You can then change individual rows in the editable table before ingesting.
+
+For disk-path ingestion, a status selectbox is shown before the ingest button. If the file already has a `status` column, that setting is ignored.
+
+**Rows with any status other than `completed` are recorded in `all_runs.csv` for traceability but are never passed to the optimization model.**
+
 ### Important yield format
-**Yields must be fractions between 0 and 1.**
+**Yields must be fractions between 0 and 1** for completed rows.
 
 - 63% → `0.63`
 - 91% → `0.91`
@@ -150,27 +182,74 @@ Invalid examples:
 - `120`
 - `-5`
 
-The app now strictly validates this and rejects out-of-range entries.
+The app strictly validates this and rejects out-of-range entries for completed rows. Non-completed rows may have a blank or missing yield value.
 
 ---
 
-## 7) Typical Workflow
+## 7) Model Output on the Recommend Page
 
-1. Initialize campaign  
-2. Run suggested experiments in the lab  
-3. Measure yields  
-4. Enter yields into CSV (fraction format 0–1)  
-5. Upload/ingest results  
-6. Generate next experiment suggestions  
+After the first batch of results has been ingested, the **Recommend** page shows a model output table alongside the suggested experiments.
+
+### Columns
+
+| Column | Meaning |
+|--------|---------|
+| `pred_mean` | Surrogate posterior mean for the target — the model's best estimate of the yield you would observe |
+| `pred_std` | Posterior standard deviation — how uncertain the model is about that prediction |
+| `acq_score` | Raw acquisition function value — the score the optimizer used to rank candidates |
+| `rank` | 1-indexed rank by acquisition score; **rank 1 is the most recommended candidate** |
+
+The table is pre-sorted by rank so the best candidates appear first. You can click any column header to re-sort.
+
+### Downloads
+
+Two download buttons are shown:
+- **Plan CSV (for lab)** — clean parameter columns only; this is what you take to the bench.
+- **Model output CSV** — same rows with all four model columns attached; useful for record-keeping and analysis.
+
+### When predictions are not available
+
+During the initial Sobol phase (before any results are ingested) the surrogate model has not yet been fitted. The page shows a plain candidate table with a note: *"Model predictions not available — ingest at least one completed measurement first."* No placeholder or fabricated values are ever shown.
+
+---
+
+## 8) Typical Workflow
+
+1. Initialize campaign (Sobol or warm-start)
+2. Run suggested experiments in the lab
+3. Record outcomes — note which experiments completed, which failed or were abandoned
+4. Enter results into CSV (yield as fraction 0–1; optionally add a `status` column)
+5. Upload/ingest results — assign status per row in the editable table
+6. Generate next experiment suggestions — model output table now shows predictions
 7. Repeat until performance is satisfactory
 
 ---
 
 ## 8) Troubleshooting
 
+### Issue: “Missing required 'status' column”
+Cause: A CSV was passed to the engine without a `status` column, bypassing the UI.
+Fix: Always use the Ingest Results page in the app, which injects the status column automatically. If scripting directly, add a `status` column to your DataFrame before calling `engine.ingest()`.
+
+### Issue: “Invalid trial status values”
+Cause: The `status` column in your CSV contains a value that is not one of the five supported statuses.
+Fix: Use only: `completed`, `failed`, `abandoned`, `partial`, `invalid`. Values are case-insensitive.
+
+### Issue: Model is not improving despite ingested results
+Cause: All ingested rows may have a non-completed status and so were excluded from model fitting.
+Fix: Check `results/all_runs.csv` — look at the `status` column. Only rows with `status=completed` update the model. The ingest confirmation message shows how many rows were added vs. excluded.
+
+### Issue: No model output table on the Recommend page
+Cause: The surrogate has not been fitted yet (no completed measurements ingested).
+Fix: Ingest at least one run with `status=completed` before requesting the next recommendation. The model output table appears automatically once the surrogate has data to train on.
+
+### Issue: `pred_mean` / `pred_std` are missing from the model output CSV
+Cause: The campaign was loaded from an older save that pre-dates Phase 4, or the surrogate was not fitted at save time.
+Fix: Ingest at least one completed result and generate a new recommendation. The model output CSV is always recomputed from the current model state.
+
 ### Issue: “yield outside [0,1]”
 Cause: Results entered as percentages (e.g., `63`) instead of fractions (`0.63`).
-Fix: Convert all yield entries to values between 0 and 1.
+Fix: Convert all yield entries to values between 0 and 1. This check applies only to completed rows.
 
 ### Issue: Configuration mismatch warning
 Cause: Current UI settings do not match the loaded campaign design space/objective.
@@ -233,6 +312,32 @@ At the top of the tab, users can:
 - Figures are auto-saved as PNG files under `WORKDIR/plots/<campaign_name>/analysis/`.
 - Cleaned dashboard data can be downloaded as CSV.
 - Dashboard summary statistics can be downloaded as JSON.
+
+## 10) Choosing a Backend Engine
+
+The Configure page lets you select the optimization engine. Both engines implement the same interface (recommend, ingest, predict, save, load).
+
+### BayBE (default)
+
+- Full acquisition function selection (qEI, UCB, qNEI, etc.)
+- UCB beta parameter for exploration tuning
+- Molecular encoding for substance parameters (MORDRED, ECFP, etc.)
+- Suitable for chemical spaces with structural diversity
+
+### Ax (ax-platform)
+
+- Ax manages the generation strategy and acquisition function internally; no manual selection required
+- Sobol initialization, then automatic BoTorch Bayesian optimization
+- Supports continuous, discrete, and categorical parameters
+- **SubstanceSpec limitation**: SMILES are treated as opaque categorical labels — no molecular descriptor encoding is applied. If your search space contains chemical structures that benefit from molecular similarity, use the BayBE engine.
+- `acq_score` in the model output table is a proxy value (predicted mean adjusted for optimization direction) because Ax does not expose per-candidate acquisition function scores for arbitrary points
+
+### Engine and acquisition notes
+
+- The engine is persisted in the campaign JSON. A campaign started with BayBE cannot be loaded as Ax, and vice versa. The `_engine` key in the saved JSON determines which loader is used.
+- When using Ax, the acquisition function selector and UCB beta slider on the Configure page are hidden — they have no effect on Ax.
+
+---
 
 ## AI Development Rules
 

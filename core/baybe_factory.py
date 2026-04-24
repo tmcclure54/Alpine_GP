@@ -88,6 +88,7 @@ CAMPAIGN_CONFIG_KEYS = {
     "n_init",
     "acquisition",
     "acquisition_kwargs",
+    "engine",
     "parameters",
 }
 PARAMETER_SPEC_KEYS = {
@@ -315,13 +316,14 @@ def validate_campaign_config(cfg: CampaignConfig) -> list[str]:
     except ValueError as exc:
         errors.append(str(exc))
 
-    errors.extend(
-        validate_acquisition_config(
-            acquisition_name=cfg.acquisition,
-            raw_kwargs=cfg.acquisition_kwargs,
-            batch_size=int(cfg.batch_size),
+    if cfg.engine != "ax":
+        errors.extend(
+            validate_acquisition_config(
+                acquisition_name=cfg.acquisition,
+                raw_kwargs=cfg.acquisition_kwargs,
+                batch_size=int(cfg.batch_size),
+            )
         )
-    )
 
     return errors
 

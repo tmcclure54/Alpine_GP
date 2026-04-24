@@ -10,7 +10,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from .baybe_factory import build_campaign
-from .campaign_engine import CampaignEngine
+from .campaign_engine import CampaignEngine, ModelNotFittedError
 from .persistence import load_text, save_text
 from .schema import (
     CampaignConfig,
@@ -18,6 +18,7 @@ from .schema import (
     NumericalContinuousSpec,
     NumericalDiscreteSpec,
     ParameterSpec,
+    VALID_TRIAL_STATUSES,
 )
 
 
@@ -120,14 +121,62 @@ class BayBEEngine(CampaignEngine):
     def recommend(self, batch_size: int) -> pd.DataFrame:
         return self._campaign.recommend(batch_size=batch_size)
 
+    def predict(self, candidates: pd.DataFrame) -> pd.DataFrame:
+        from baybe.exceptions import ModelNotTrainedError, NoMeasurementsError
+
+        try:
+            stats_df = self._campaign.posterior_stats(candidates, stats=("mean", "std"))
+            acq_series = self._campaign.acquisition_values(candidates)
+        except (ModelNotTrainedError, NoMeasurementsError) as exc:
+            raise ModelNotFittedError(
+                "Surrogate predictions not available. Ingest at least one completed "
+                "measurement and call recommend() before requesting model metadata."
+            ) from exc
+
+        out = candidates.copy()
+
+        target = self.cfg.objective_target
+        mean_col = f"{target}_mean"
+        std_col = f"{target}_std"
+
+        if mean_col in stats_df.columns:
+            out["pred_mean"] = stats_df[mean_col].values
+        if std_col in stats_df.columns:
+            out["pred_std"] = stats_df[std_col].values
+
+        out["acq_score"] = acq_series.values
+        # rank 1 = highest acquisition score
+        out["rank"] = acq_series.rank(ascending=False, method="first").astype(int)
+
+        return out
+
     def ingest(self, df: pd.DataFrame) -> pd.DataFrame:
+        if "status" not in df.columns:
+            raise ValueError(
+                "Missing required 'status' column. Every ingestion event must specify a trial status "
+                f"({', '.join(sorted(VALID_TRIAL_STATUSES))})."
+            )
+
+        df = df.copy()
+        df["status"] = df["status"].astype(str).str.lower().str.strip()
+        invalid_statuses = set(df["status"].unique()) - VALID_TRIAL_STATUSES
+        if invalid_statuses:
+            raise ValueError(
+                f"Invalid trial status values: {sorted(invalid_statuses)}. "
+                f"Supported values: {sorted(VALID_TRIAL_STATUSES)}."
+            )
+
         param_cols = [param.name for param in self.cfg.parameters]
         target_col = self.cfg.objective_target
-        missing = [column for column in (param_cols + [target_col]) if column not in df.columns]
+        missing = [c for c in (param_cols + [target_col]) if c not in df.columns]
         if missing:
             raise ValueError(f"Missing required columns for ingestion: {missing}.")
 
-        df_use = df[param_cols + [target_col]].copy()
+        df_completed = df[df["status"] == "completed"].copy()
+        if df_completed.empty:
+            return df
+
+        df_model = df_completed[param_cols + [target_col]].copy()
 
         def _normalize_for_campaign(series: pd.Series, is_numeric: bool) -> pd.Series:
             if is_numeric:
@@ -137,17 +186,17 @@ class BayBEEngine(CampaignEngine):
         numeric_param_types = (NumericalContinuousSpec, NumericalDiscreteSpec)
         introduced_nulls: list[str] = []
         for param in self.cfg.parameters:
-            before = df_use[param.name]
+            before = df_model[param.name]
             after = _normalize_for_campaign(before, isinstance(param, numeric_param_types))
             if ((~before.isna()) & after.isna()).any():
                 introduced_nulls.append(param.name)
-            df_use[param.name] = after
+            df_model[param.name] = after
 
-        target_before = df_use[target_col]
+        target_before = df_model[target_col]
         target_after = _normalize_for_campaign(target_before, is_numeric=True)
         if ((~target_before.isna()) & target_after.isna()).any():
             introduced_nulls.append(target_col)
-        df_use[target_col] = target_after
+        df_model[target_col] = target_after
 
         if introduced_nulls:
             raise ValueError(
@@ -156,9 +205,9 @@ class BayBEEngine(CampaignEngine):
             )
 
         self._normalize_searchspace_for_matching()
-        normalized = self._ensure_numpy_backed_dataframe(df_use)
+        normalized = self._ensure_numpy_backed_dataframe(df_model)
         self._campaign.add_measurements(normalized)
-        return normalized
+        return df
 
     def save(self, path: Path) -> None:
         save_text(path, self._campaign.to_json())

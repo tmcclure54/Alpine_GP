@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Type
+from typing import Any, Dict, FrozenSet, List, Literal, Optional, Type
+
+EngineType = Literal["baybe", "ax"]
+
+TrialStatus = Literal["completed", "failed", "abandoned", "partial", "invalid"]
+VALID_TRIAL_STATUSES: FrozenSet[str] = frozenset({"completed", "failed", "abandoned", "partial", "invalid"})
 
 
 # ------------------------
@@ -83,6 +88,8 @@ class CampaignConfig:
     acquisition: str = "qExpectedImprovement"
     acquisition_kwargs: Dict[str, Any] = field(default_factory=dict)
 
+    engine: EngineType = "baybe"
+
     parameters: List[ParameterSpec] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -94,6 +101,7 @@ class CampaignConfig:
             "init_mode": self.init_mode,
             "n_init": self.n_init,
             "acquisition": self.acquisition,
+            "engine": self.engine,
             "parameters": [p.to_dict() for p in self.parameters],
         }
         if self.acquisition_kwargs:
@@ -112,5 +120,6 @@ class CampaignConfig:
             n_init=int(d.get("n_init", 0)),
             acquisition=d.get("acquisition", "qExpectedImprovement"),
             acquisition_kwargs=d.get("acquisition_kwargs", {}) or {},
+            engine=d.get("engine", "baybe"),
             parameters=params,
         )

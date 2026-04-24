@@ -22,7 +22,7 @@ from core.baybe_factory import (
     validate_campaign_config,
     validate_config_payload,
 )
-from core.campaign_engine import create_campaign_engine, extract_saved_campaign_metadata, load_campaign_engine
+from core.campaign_engine import create_campaign_engine, extract_saved_campaign_metadata, load_campaign_engine, ModelNotFittedError
 from core.persistence import (
     ensure_campaign_dirs,
     campaign_latest_path,
@@ -618,51 +618,74 @@ def render_config_page(workdir: Path) -> None:
         )
         cfg.n_init = int(st.number_input("# init points", min_value=0, value=int(cfg.n_init), step=1, key="cfg_n_init"))
 
-    with colR:
-        st.markdown("### Acquisition function (BayBE → BoTorch)")
-        st.caption("BayBE wrappers are shown here. The plot places them on a practical exploration ↔ exploitation spectrum.")
-        st.caption("Only acquisition functions supported by the current backend and batch size are shown.")
-        available_acquisitions = supported_acquisition_names(int(cfg.batch_size))
-        if int(cfg.batch_size) > 1:
-            st.caption("Batch size > 1 requires batch-compatible acquisition functions (`q...`).")
-        if not available_acquisitions:
-            st.error(f"No acquisition functions are available for batch size {int(cfg.batch_size)}.")
-            return
-        if cfg.acquisition not in available_acquisitions:
-            st.error(
-                f"Configured acquisition '{cfg.acquisition}' is not supported for batch size {int(cfg.batch_size)}. "
-                "Choose one of the supported options below."
-            )
-        cfg.acquisition = st.selectbox(
-            "Acquisition",
-            options=available_acquisitions,
-            index=(
-                available_acquisitions.index(cfg.acquisition)
-                if cfg.acquisition in available_acquisitions
-                else available_acquisitions.index(default_acquisition_name(int(cfg.batch_size)))
-            ),
-            key="cfg_acquisition",
+        st.markdown("### Backend engine")
+        engine_options = ["baybe", "ax"]
+        cfg.engine = st.selectbox(
+            "Optimization engine",
+            options=engine_options,
+            index=engine_options.index(cfg.engine) if cfg.engine in engine_options else 0,
+            key="cfg_engine",
+            help="BayBE: full acquisition function control and molecular encoding. Ax: Ax platform BoTorch integration.",
         )
-
-        if acquisition_supports_beta(cfg.acquisition):
-            current_beta = float((cfg.acquisition_kwargs or {}).get("beta", 2.0))
-            beta = float(
-                st.slider(
-                    "UCB beta",
-                    min_value=0.1,
-                    max_value=10.0,
-                    value=current_beta,
-                    step=0.1,
-                    key="cfg_ucb_beta",
-                    help="Larger beta weights uncertainty more heavily, so the optimizer explores more.",
-                )
+        if cfg.engine == "ax":
+            st.info(
+                "**Ax engine selected.** Acquisition function settings are managed internally by Ax. "
+                "SubstanceSpec parameters are supported as opaque categorical labels — "
+                "no molecular encoding is applied."
             )
-            cfg.acquisition_kwargs = {"beta": beta}
-        else:
-            beta = None
-            cfg.acquisition_kwargs = {}
 
-        _render_acquisition_map(cfg.acquisition, beta)
+    with colR:
+        if cfg.engine == "ax":
+            st.markdown("### Acquisition function")
+            st.info(
+                "Acquisition function selection is not available when using the Ax engine. "
+                "Ax manages the generation strategy and acquisition function internally."
+            )
+        else:
+            st.markdown("### Acquisition function (BayBE → BoTorch)")
+            st.caption("BayBE wrappers are shown here. The plot places them on a practical exploration ↔ exploitation spectrum.")
+            st.caption("Only acquisition functions supported by the current backend and batch size are shown.")
+            available_acquisitions = supported_acquisition_names(int(cfg.batch_size))
+            if int(cfg.batch_size) > 1:
+                st.caption("Batch size > 1 requires batch-compatible acquisition functions (`q...`).")
+            if not available_acquisitions:
+                st.error(f"No acquisition functions are available for batch size {int(cfg.batch_size)}.")
+                return
+            if cfg.acquisition not in available_acquisitions:
+                st.error(
+                    f"Configured acquisition '{cfg.acquisition}' is not supported for batch size {int(cfg.batch_size)}. "
+                    "Choose one of the supported options below."
+                )
+            cfg.acquisition = st.selectbox(
+                "Acquisition",
+                options=available_acquisitions,
+                index=(
+                    available_acquisitions.index(cfg.acquisition)
+                    if cfg.acquisition in available_acquisitions
+                    else available_acquisitions.index(default_acquisition_name(int(cfg.batch_size)))
+                ),
+                key="cfg_acquisition",
+            )
+
+            if acquisition_supports_beta(cfg.acquisition):
+                current_beta = float((cfg.acquisition_kwargs or {}).get("beta", 2.0))
+                beta = float(
+                    st.slider(
+                        "UCB beta",
+                        min_value=0.1,
+                        max_value=10.0,
+                        value=current_beta,
+                        step=0.1,
+                        key="cfg_ucb_beta",
+                        help="Larger beta weights uncertainty more heavily, so the optimizer explores more.",
+                    )
+                )
+                cfg.acquisition_kwargs = {"beta": beta}
+            else:
+                beta = None
+                cfg.acquisition_kwargs = {}
+
+            _render_acquisition_map(cfg.acquisition, beta)
 
     st.divider()
     st.markdown("### Parameters")
@@ -875,7 +898,7 @@ def render_init_page(workdir: Path) -> None:
         return
     config_is_compatible = _check_campaign_config_compatibility(cfg, workdir)
     st.info(
-        "Initialization writes an initial plan (run0.csv) and persists a BayBE campaign JSON. "
+        "Initialization writes an initial plan (run0.csv) and persists a campaign JSON. "
         "Choose Sobol init for a cold start, or ingest an existing CSV for a warm start."
     )
 
@@ -927,7 +950,12 @@ def render_init_page(workdir: Path) -> None:
                     st.error(f"Missing required columns: {missing}")
                     st.stop()
                 df0 = df[needed].iloc[: cfg.n_init].copy()
-                target_error = _validate_fraction_target(df0, cfg.objective_target)
+                if "status" not in df0.columns:
+                    df0["status"] = "completed"
+                    st.info("No 'status' column in initialization CSV — all rows assigned status='completed'.")
+                target_error = _validate_fraction_target(
+                    df0[df0["status"].astype(str).str.lower() == "completed"], cfg.objective_target
+                )
                 if target_error:
                     st.error(target_error)
                     return
@@ -945,6 +973,37 @@ def render_init_page(workdir: Path) -> None:
                 append_all_runs(workdir, df0, run_idx=-1)
                 st.success(f"Initialized campaign from {len(df0)} rows. Saved {latest} and {init_path}.")
 
+
+
+def _render_model_output(engine, plan: pd.DataFrame, plan_filename: str) -> None:
+    """Show plan candidates enriched with surrogate predictions, or fall back gracefully."""
+    try:
+        enriched = engine.predict(plan)
+    except ModelNotFittedError:
+        st.info(
+            "Model predictions not available — the surrogate has not been fitted yet. "
+            "Ingest at least one completed measurement first."
+        )
+        _download_button_df("Download plan CSV", plan, plan_filename)
+        st.dataframe(plan, use_container_width=True)
+        return
+
+    st.markdown("#### Model output")
+    st.caption(
+        "`pred_mean` — surrogate posterior mean for the target. "
+        "`pred_std` — posterior standard deviation (uncertainty). "
+        "`acq_score` — raw acquisition function value. "
+        "`rank` — 1 = highest acquisition score (best candidate according to the model)."
+    )
+    display = enriched.sort_values("rank") if "rank" in enriched.columns else enriched
+    st.dataframe(display, use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        _download_button_df("Download plan CSV (for lab)", plan, plan_filename)
+    with col2:
+        model_filename = plan_filename.replace(".csv", "_model_output.csv")
+        _download_button_df("Download model output CSV", enriched, model_filename)
 
 
 def render_recommend_page(workdir: Path) -> None:
@@ -993,8 +1052,7 @@ def render_recommend_page(workdir: Path) -> None:
                     "The configured batch size applies per recommendation call. "
                     "Requesting another batch before ingesting results creates additional pending experiments."
                 )
-                _download_button_df("Download active batch CSV", active_df, active_name)
-                st.dataframe(active_df, use_container_width=True)
+                _render_model_output(engine, active_df, active_name)
                 allow_new_batch = st.checkbox(
                     "Generate a new batch instead of reusing the active batch",
                     value=False,
@@ -1055,8 +1113,7 @@ def render_recommend_page(workdir: Path) -> None:
         snap = campaign_snapshot_path(workdir, cfg.campaign_name, tag=f"after_recommend_run{next_run}")
         engine.save(snap)
         st.success(f"Saved plan -> {out_path}")
-        _download_button_df("Download plan CSV", rec_final, f"run{next_run}.csv")
-        st.dataframe(rec_final, use_container_width=True)
+        _render_model_output(engine, rec_final, f"run{next_run}.csv")
 
 
 
@@ -1077,6 +1134,66 @@ def _validate_fraction_target(df: pd.DataFrame, target_col: str) -> Optional[str
     return None
 
 
+_VALID_STATUSES = ["completed", "failed", "abandoned", "partial", "invalid"]
+
+
+def _inject_status_ui(df: pd.DataFrame, param_cols: List[str], target_col: str, editor_key: str) -> pd.DataFrame:
+    """Show status column UI and return df with status column populated from user input."""
+    has_csv_status = "status" in df.columns
+
+    if has_csv_status:
+        bad = set(df["status"].dropna().astype(str).str.lower()) - set(_VALID_STATUSES)
+        if bad:
+            st.error(
+                f"CSV contains invalid status values: {sorted(bad)}. "
+                f"Valid values: {_VALID_STATUSES}. Correct the CSV or edit statuses below."
+            )
+        else:
+            st.success("CSV has a 'status' column — values loaded below. Edit per-row if needed.")
+        df = df.copy()
+        df["status"] = df["status"].astype(str).str.lower().str.strip()
+    else:
+        st.info(
+            "No 'status' column in CSV. Select a default status below, then edit individual rows as needed. "
+            "Only **completed** rows are passed to the model."
+        )
+        global_status = st.selectbox(
+            "Default status for all rows",
+            options=_VALID_STATUSES,
+            index=0,
+            key=f"{editor_key}_global",
+            help="Only 'completed' rows update the model. Other statuses are recorded but excluded from fitting.",
+        )
+        df = df.copy()
+        df["status"] = global_status
+
+    display_cols = [c for c in (param_cols + [target_col, "status"]) if c in df.columns]
+    edited = st.data_editor(
+        df[display_cols].copy(),
+        column_config={
+            "status": st.column_config.SelectboxColumn(
+                "Status",
+                options=_VALID_STATUSES,
+                required=True,
+                width="medium",
+            )
+        },
+        use_container_width=True,
+        num_rows="fixed",
+        key=editor_key,
+    )
+
+    completed_n = int((edited["status"].astype(str).str.lower() == "completed").sum())
+    st.caption(
+        f"{completed_n} of {len(edited)} rows marked **completed** — "
+        f"{len(edited) - completed_n} will be recorded but excluded from model fitting."
+    )
+
+    df_out = df.copy()
+    df_out["status"] = edited["status"].values
+    return df_out
+
+
 def render_ingest_page(workdir: Path) -> None:
     st.subheader("4) Ingest results + update campaign")
     cfg = CampaignConfig.from_dict(st.session_state["config"])
@@ -1093,31 +1210,44 @@ def render_ingest_page(workdir: Path) -> None:
     config_is_compatible = _check_campaign_config_compatibility(cfg, workdir)
 
     engine = load_campaign_engine(latest, cfg)
+    param_cols = [p.name for p in cfg.parameters]
+    target_col = cfg.objective_target
+
     st.caption(
         "Upload a results CSV (typically a copy of the plan CSV with an extra target column), or point the app to the on-disk results file. "
-        "Enter yields as fractions (0–1). Example: 0.63 for 63% yield."
+        "Enter yields as fractions (0–1). Example: 0.63 for 63% yield. "
+        "**A trial status is required for every row** — only 'completed' rows are used in model fitting."
     )
     run_idx = int(st.number_input("Run index for this results file", min_value=0, value=0, step=1))
-    up = st.file_uploader("Upload results CSV", type=["csv"], key="resultscsv")
-    if up is None:
-        st.info("Or place a file at results/runN_results.csv and use the disk-ingest button.")
 
-    colA, colB = st.columns([1, 1])
-    with colA:
-        if up is not None:
-            df = pd.read_csv(up)
-            st.dataframe(df.head(20), use_container_width=True)
-            if st.button("Ingest uploaded results", disabled=not config_is_compatible):
-                _ingest_df_and_persist(workdir, cfg, engine, df, run_idx)
-    with colB:
-        disk_path = run_results_path(workdir, run_idx)
-        st.code(str(disk_path))
-        if st.button("Ingest results from disk path", disabled=not config_is_compatible):
-            if not disk_path.exists():
-                st.error(f"Missing: {disk_path}")
-                st.stop()
-            df = pd.read_csv(disk_path)
-            _ingest_df_and_persist(workdir, cfg, engine, df, run_idx)
+    st.markdown("#### Upload path")
+    up = st.file_uploader("Upload results CSV", type=["csv"], key="resultscsv")
+    if up is not None:
+        df_raw = pd.read_csv(up)
+        editor_key = f"ingest_editor_upload_{run_idx}_{up.name}"
+        df_with_status = _inject_status_ui(df_raw, param_cols, target_col, editor_key)
+        if st.button("Ingest uploaded results", disabled=not config_is_compatible):
+            _ingest_df_and_persist(workdir, cfg, engine, df_with_status, run_idx)
+
+    st.markdown("#### Disk path")
+    disk_path = run_results_path(workdir, run_idx)
+    st.code(str(disk_path))
+    disk_status = st.selectbox(
+        "Status to assign for disk-loaded rows (if CSV lacks a status column)",
+        options=_VALID_STATUSES,
+        index=0,
+        key="disk_global_status",
+        help="If the file already has a 'status' column, this setting is ignored.",
+    )
+    if st.button("Ingest results from disk path", disabled=not config_is_compatible):
+        if not disk_path.exists():
+            st.error(f"Missing: {disk_path}")
+            st.stop()
+        df = pd.read_csv(disk_path)
+        if "status" not in df.columns:
+            df["status"] = disk_status
+            st.info(f"No 'status' column in file — assigned status='{disk_status}' to all {len(df)} rows.")
+        _ingest_df_and_persist(workdir, cfg, engine, df, run_idx)
 
 
 
@@ -1129,18 +1259,29 @@ def _ingest_df_and_persist(workdir: Path, cfg: CampaignConfig, engine, df: pd.Da
         st.error(f"Missing required columns: {missing}")
         return
 
-    df_use = df[param_cols + [target_col]].copy()
+    cols_to_use = param_cols + [target_col] + (["status"] if "status" in df.columns else [])
+    df_use = df[cols_to_use].copy()
 
-    target_error = _validate_fraction_target(df_use, target_col)
-    if target_error:
-        st.error(target_error)
-        return
+    # Only validate fraction target for completed rows; non-completed may have NaN targets.
+    df_completed_preview = (
+        df_use[df_use["status"].astype(str).str.lower() == "completed"]
+        if "status" in df_use.columns
+        else df_use
+    )
+    if not df_completed_preview.empty:
+        target_error = _validate_fraction_target(df_completed_preview, target_col)
+        if target_error:
+            st.error(target_error)
+            return
 
     try:
         df_use = engine.ingest(df_use)
     except ValueError as exc:
         st.error(f"Failed to ingest results: {exc}")
         return
+
+    completed_count = int((df_use["status"] == "completed").sum()) if "status" in df_use.columns else len(df_use)
+    non_completed_count = len(df_use) - completed_count
 
     out_path = run_results_path(workdir, run_idx)
     df_use.to_csv(out_path, index=False)
@@ -1150,7 +1291,11 @@ def _ingest_df_and_persist(workdir: Path, cfg: CampaignConfig, engine, df: pd.Da
     engine.save(latest)
     snap = campaign_snapshot_path(workdir, cfg.campaign_name, tag=f"after_ingest_run{run_idx}")
     engine.save(snap)
-    st.success(f"Ingested {len(df_use)} rows. Saved {out_path} and updated {latest}.")
+    st.success(
+        f"Ingested {len(df_use)} rows — "
+        f"{completed_count} added to model, {non_completed_count} excluded (non-completed). "
+        f"Saved {out_path} and updated {latest}."
+    )
 
 
 
