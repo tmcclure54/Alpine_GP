@@ -4,9 +4,28 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Literal, Optional, Type
 
 EngineType = Literal["baybe", "ax"]
+ObjectiveMode = Literal["maximize", "minimize"]
 
 TrialStatus = Literal["completed", "failed", "abandoned", "partial", "invalid"]
 VALID_TRIAL_STATUSES: FrozenSet[str] = frozenset({"completed", "failed", "abandoned", "partial", "invalid"})
+
+
+# ------------------------
+# Target spec (multi-objective)
+# ------------------------
+
+
+@dataclass
+class TargetSpec:
+    name: str
+    mode: ObjectiveMode = "maximize"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"name": self.name, "mode": self.mode}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "TargetSpec":
+        return cls(name=d["name"], mode=d.get("mode", "maximize"))
 
 
 # ------------------------
@@ -78,7 +97,7 @@ class SubstanceSpec(ParameterSpec):
 class CampaignConfig:
     campaign_name: str
     objective_target: str = "yield"
-    objective_mode: Literal["maximize", "minimize"] = "maximize"
+    objective_mode: ObjectiveMode = "maximize"
 
     batch_size: int = 8
 
@@ -91,6 +110,24 @@ class CampaignConfig:
     engine: EngineType = "baybe"
 
     parameters: List[ParameterSpec] = field(default_factory=list)
+
+    # Multi-objective: when non-empty, this list is the source of truth for the
+    # campaign's optimization targets. When empty, a single target is derived
+    # from objective_target/objective_mode (legacy single-objective behaviour).
+    targets: List[TargetSpec] = field(default_factory=list)
+
+    def effective_targets(self) -> List[TargetSpec]:
+        """Always returns a list of >= 1 TargetSpec.
+
+        Bridges single-target (objective_target/objective_mode) and explicit
+        multi-target configurations into a uniform list.
+        """
+        if self.targets:
+            return list(self.targets)
+        return [TargetSpec(name=self.objective_target, mode=self.objective_mode)]
+
+    def is_multi_objective(self) -> bool:
+        return len(self.effective_targets()) > 1
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
@@ -106,11 +143,14 @@ class CampaignConfig:
         }
         if self.acquisition_kwargs:
             data["acquisition_kwargs"] = self.acquisition_kwargs
+        if self.targets:
+            data["targets"] = [t.to_dict() for t in self.targets]
         return data
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "CampaignConfig":
         params = [ParameterSpec.from_dict(x) for x in d.get("parameters", [])]
+        targets = [TargetSpec.from_dict(x) for x in d.get("targets", []) or []]
         return cls(
             campaign_name=d.get("campaign_name", "default"),
             objective_target=d.get("objective_target", "yield"),
@@ -122,4 +162,5 @@ class CampaignConfig:
             acquisition_kwargs=d.get("acquisition_kwargs", {}) or {},
             engine=d.get("engine", "baybe"),
             parameters=params,
+            targets=targets,
         )

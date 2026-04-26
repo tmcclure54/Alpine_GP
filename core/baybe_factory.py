@@ -90,6 +90,7 @@ CAMPAIGN_CONFIG_KEYS = {
     "acquisition_kwargs",
     "engine",
     "parameters",
+    "targets",
 }
 PARAMETER_SPEC_KEYS = {
     "NumericalContinuousSpec": {"_type", "name", "lower", "upper", "unit"},
@@ -315,6 +316,25 @@ def validate_campaign_config(cfg: CampaignConfig) -> list[str]:
         validate_parameter_specs(cfg.parameters)
     except ValueError as exc:
         errors.append(str(exc))
+
+    targets = cfg.effective_targets()
+    target_names = [t.name for t in targets]
+    if any(not name or not name.strip() for name in target_names):
+        errors.append("All targets must have a non-empty name.")
+    if len(set(target_names)) != len(target_names):
+        errors.append(f"Target names must be unique; got {target_names}.")
+    for t in targets:
+        if t.mode not in {"maximize", "minimize"}:
+            errors.append(
+                f"Target '{t.name}' has unsupported mode '{t.mode}'. "
+                "Supported values: ['maximize', 'minimize']."
+            )
+
+    if cfg.is_multi_objective() and cfg.engine == "baybe":
+        errors.append(
+            "Multi-objective optimization is not supported by the BayBE engine in this build. "
+            "Switch to the Ax engine on the Configure page to use multiple targets."
+        )
 
     if cfg.engine != "ax":
         errors.extend(

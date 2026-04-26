@@ -13,6 +13,7 @@ from core.schema import (
     NumericalDiscreteSpec,
     CategoricalSpec,
     SubstanceSpec,
+    TargetSpec,
 )
 from core.baybe_factory import (
     acquisition_supports_beta,
@@ -279,6 +280,7 @@ def _clear_config_widget_state() -> None:
         "smiles_",
         "senc_",
         "decor_",
+        "cfg_target_",
     )
     for key in list(st.session_state.keys()):
         if any(key.startswith(prefix) for prefix in prefixes):
@@ -297,6 +299,9 @@ def _load_config_for_campaign(workdir: Path, meta: Dict[str, Any]) -> CampaignCo
     cfg.campaign_name = meta["campaign_name"]
     cfg.objective_target = meta.get("objective_target", cfg.objective_target)
     cfg.objective_mode = meta.get("objective_mode", cfg.objective_mode)
+    targets_meta = meta.get("targets")
+    if isinstance(targets_meta, list) and len(targets_meta) > 1:
+        cfg.targets = [TargetSpec(name=t["name"], mode=t.get("mode", "maximize")) for t in targets_meta]
     acquisition = meta.get("acquisition")
     if acquisition in ACQ_ORDER:
         cfg.acquisition = acquisition
@@ -598,13 +603,58 @@ def render_config_page(workdir: Path) -> None:
 
     with colL:
         st.markdown("### Objective")
-        cfg.objective_target = st.text_input("Target column name", value=cfg.objective_target, key="cfg_objective_target")
-        cfg.objective_mode = st.selectbox(
-            "Optimize direction",
-            options=["maximize", "minimize"],
-            index=0 if cfg.objective_mode == "maximize" else 1,
-            key="cfg_objective_mode",
+        targets = list(cfg.effective_targets())
+        st.caption(
+            "Add 2+ targets to enable multi-objective (Pareto) optimization. "
+            "Multi-objective requires the Ax engine."
         )
+
+        def _commit_targets(updated: List[TargetSpec]) -> None:
+            cfg.targets = list(updated) if len(updated) > 1 else []
+            cfg.objective_target = updated[0].name
+            cfg.objective_mode = updated[0].mode
+            st.session_state["config"] = cfg.to_dict()
+            for k in list(st.session_state.keys()):
+                if k.startswith("cfg_target_name_") or k.startswith("cfg_target_mode_"):
+                    st.session_state.pop(k, None)
+
+        new_targets: List[TargetSpec] = []
+        for i, tgt in enumerate(targets):
+            tcols = st.columns([3, 2, 1])
+            with tcols[0]:
+                t_name = st.text_input(
+                    f"Target #{i + 1} name",
+                    value=tgt.name,
+                    key=f"cfg_target_name_{i}",
+                )
+            with tcols[1]:
+                t_mode = st.selectbox(
+                    f"Target #{i + 1} direction",
+                    options=["maximize", "minimize"],
+                    index=0 if tgt.mode == "maximize" else 1,
+                    key=f"cfg_target_mode_{i}",
+                )
+            with tcols[2]:
+                # Block deleting the last target — at least one is required.
+                if len(targets) > 1 and st.button("Remove", key=f"cfg_target_del_{i}"):
+                    keep = [
+                        TargetSpec(name=t.name, mode=t.mode)
+                        for j, t in enumerate(targets)
+                        if j != i
+                    ]
+                    _commit_targets(keep)
+                    st.rerun()
+            new_targets.append(TargetSpec(name=t_name, mode=t_mode))
+
+        if st.button("Add target", key="cfg_target_add"):
+            new_targets.append(TargetSpec(name=f"target_{len(new_targets) + 1}", mode="maximize"))
+            _commit_targets(new_targets)
+            st.rerun()
+
+        # Persist the edited targets back into cfg.
+        cfg.targets = new_targets if len(new_targets) > 1 else []
+        cfg.objective_target = new_targets[0].name
+        cfg.objective_mode = new_targets[0].mode
 
         st.markdown("### Batch")
         cfg.batch_size = int(st.number_input("Batch size", min_value=1, value=int(cfg.batch_size), step=1, key="cfg_batch_size"))
@@ -944,7 +994,8 @@ def render_init_page(workdir: Path) -> None:
                 except Exception as exc:
                     st.error(f"Campaign initialization failed: {exc}")
                     return
-                needed = [p.name for p in cfg.parameters] + [cfg.objective_target]
+                target_cols = [t.name for t in cfg.effective_targets()]
+                needed = [p.name for p in cfg.parameters] + target_cols
                 missing = [c for c in needed if c not in df.columns]
                 if missing:
                     st.error(f"Missing required columns: {missing}")
@@ -953,9 +1004,18 @@ def render_init_page(workdir: Path) -> None:
                 if "status" not in df0.columns:
                     df0["status"] = "completed"
                     st.info("No 'status' column in initialization CSV — all rows assigned status='completed'.")
-                target_error = _validate_fraction_target(
-                    df0[df0["status"].astype(str).str.lower() == "completed"], cfg.objective_target
-                )
+                df_completed_init = df0[df0["status"].astype(str).str.lower() == "completed"]
+                if cfg.is_multi_objective():
+                    target_error = next(
+                        (
+                            _validate_numeric_target(df_completed_init, tcol)
+                            for tcol in target_cols
+                            if _validate_numeric_target(df_completed_init, tcol) is not None
+                        ),
+                        None,
+                    )
+                else:
+                    target_error = _validate_fraction_target(df_completed_init, target_cols[0])
                 if target_error:
                     st.error(target_error)
                     return
@@ -1134,10 +1194,21 @@ def _validate_fraction_target(df: pd.DataFrame, target_col: str) -> Optional[str
     return None
 
 
+def _validate_numeric_target(df: pd.DataFrame, target_col: str) -> Optional[str]:
+    """Validate target column is numeric (no fraction-range constraint)."""
+    vals = pd.to_numeric(df[target_col], errors="coerce")
+    if vals.isna().any():
+        return (
+            f"Column '{target_col}' contains non-numeric values. "
+            "Every completed trial must have a numeric value for this target."
+        )
+    return None
+
+
 _VALID_STATUSES = ["completed", "failed", "abandoned", "partial", "invalid"]
 
 
-def _inject_status_ui(df: pd.DataFrame, param_cols: List[str], target_col: str, editor_key: str) -> pd.DataFrame:
+def _inject_status_ui(df: pd.DataFrame, param_cols: List[str], target_cols: List[str], editor_key: str) -> pd.DataFrame:
     """Show status column UI and return df with status column populated from user input."""
     has_csv_status = "status" in df.columns
 
@@ -1167,7 +1238,7 @@ def _inject_status_ui(df: pd.DataFrame, param_cols: List[str], target_col: str, 
         df = df.copy()
         df["status"] = global_status
 
-    display_cols = [c for c in (param_cols + [target_col, "status"]) if c in df.columns]
+    display_cols = [c for c in (param_cols + list(target_cols) + ["status"]) if c in df.columns]
     edited = st.data_editor(
         df[display_cols].copy(),
         column_config={
@@ -1211,13 +1282,19 @@ def render_ingest_page(workdir: Path) -> None:
 
     engine = load_campaign_engine(latest, cfg)
     param_cols = [p.name for p in cfg.parameters]
-    target_col = cfg.objective_target
+    target_cols = [t.name for t in cfg.effective_targets()]
 
-    st.caption(
-        "Upload a results CSV (typically a copy of the plan CSV with an extra target column), or point the app to the on-disk results file. "
-        "Enter yields as fractions (0–1). Example: 0.63 for 63% yield. "
-        "**A trial status is required for every row** — only 'completed' rows are used in model fitting."
-    )
+    if cfg.is_multi_objective():
+        st.caption(
+            f"Multi-objective campaign — every completed row must include numeric values for all targets: {target_cols}. "
+            "**A trial status is required for every row** — only 'completed' rows are used in model fitting."
+        )
+    else:
+        st.caption(
+            "Upload a results CSV (typically a copy of the plan CSV with an extra target column), or point the app to the on-disk results file. "
+            "Enter yields as fractions (0–1). Example: 0.63 for 63% yield. "
+            "**A trial status is required for every row** — only 'completed' rows are used in model fitting."
+        )
     run_idx = int(st.number_input("Run index for this results file", min_value=0, value=0, step=1))
 
     st.markdown("#### Upload path")
@@ -1225,7 +1302,7 @@ def render_ingest_page(workdir: Path) -> None:
     if up is not None:
         df_raw = pd.read_csv(up)
         editor_key = f"ingest_editor_upload_{run_idx}_{up.name}"
-        df_with_status = _inject_status_ui(df_raw, param_cols, target_col, editor_key)
+        df_with_status = _inject_status_ui(df_raw, param_cols, target_cols, editor_key)
         if st.button("Ingest uploaded results", disabled=not config_is_compatible):
             _ingest_df_and_persist(workdir, cfg, engine, df_with_status, run_idx)
 
@@ -1253,26 +1330,36 @@ def render_ingest_page(workdir: Path) -> None:
 
 def _ingest_df_and_persist(workdir: Path, cfg: CampaignConfig, engine, df: pd.DataFrame, run_idx: int) -> None:
     param_cols = [p.name for p in cfg.parameters]
-    target_col = cfg.objective_target
-    missing = [c for c in (param_cols + [target_col]) if c not in df.columns]
+    target_cols = [t.name for t in cfg.effective_targets()]
+    missing = [c for c in (param_cols + target_cols) if c not in df.columns]
     if missing:
         st.error(f"Missing required columns: {missing}")
         return
 
-    cols_to_use = param_cols + [target_col] + (["status"] if "status" in df.columns else [])
+    cols_to_use = param_cols + target_cols + (["status"] if "status" in df.columns else [])
     df_use = df[cols_to_use].copy()
 
-    # Only validate fraction target for completed rows; non-completed may have NaN targets.
+    # Only validate target columns for completed rows; non-completed may have NaN targets.
     df_completed_preview = (
         df_use[df_use["status"].astype(str).str.lower() == "completed"]
         if "status" in df_use.columns
         else df_use
     )
     if not df_completed_preview.empty:
-        target_error = _validate_fraction_target(df_completed_preview, target_col)
-        if target_error:
-            st.error(target_error)
-            return
+        # Single-target campaigns historically enforced a [0, 1] fraction range.
+        # Multi-objective campaigns can have arbitrary numeric targets, so only
+        # require they be numeric.
+        if cfg.is_multi_objective():
+            for tcol in target_cols:
+                target_error = _validate_numeric_target(df_completed_preview, tcol)
+                if target_error:
+                    st.error(target_error)
+                    return
+        else:
+            target_error = _validate_fraction_target(df_completed_preview, target_cols[0])
+            if target_error:
+                st.error(target_error)
+                return
 
     try:
         df_use = engine.ingest(df_use)
@@ -1343,7 +1430,12 @@ def render_campaign_dashboard_page(workdir: Path) -> None:
 
     df_trials = pd.read_csv(runs_path)
     campaign_dir = workdir / "plots" / cfg.campaign_name
-    render_campaign_dashboard(df_trials=df_trials, campaign_dir=campaign_dir)
+    target_specs = [t.to_dict() for t in cfg.effective_targets()]
+    render_campaign_dashboard(
+        df_trials=df_trials,
+        campaign_dir=campaign_dir,
+        target_specs=target_specs,
+    )
 
 
 if __name__ == "__main__":

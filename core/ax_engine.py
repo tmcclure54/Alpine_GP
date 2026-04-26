@@ -16,6 +16,7 @@ from .schema import (
     NumericalDiscreteSpec,
     ParameterSpec,
     SubstanceSpec,
+    TargetSpec,
     VALID_TRIAL_STATUSES,
 )
 
@@ -82,9 +83,30 @@ def extract_ax_campaign_metadata(path: Path) -> dict[str, Any]:
 
     opt_config = exp.get("optimization_config", {}) or {}
     objective = opt_config.get("objective", {}) or {}
-    metric = objective.get("metric", {}) or {}
-    target_name = metric.get("name", "unknown")
-    objective_mode = "minimize" if objective.get("minimize", False) else "maximize"
+
+    # Detect multi-objective: Ax stores MultiObjective with an "objectives" list
+    target_specs: list[dict[str, Any]] = []
+    sub_objectives = objective.get("objectives")
+    if isinstance(sub_objectives, list) and sub_objectives:
+        for sub in sub_objectives:
+            metric = sub.get("metric", {}) or {}
+            target_specs.append(
+                {
+                    "name": metric.get("name", "unknown"),
+                    "mode": "minimize" if sub.get("minimize", False) else "maximize",
+                }
+            )
+    else:
+        metric = objective.get("metric", {}) or {}
+        target_specs.append(
+            {
+                "name": metric.get("name", "unknown"),
+                "mode": "minimize" if objective.get("minimize", False) else "maximize",
+            }
+        )
+
+    target_name = target_specs[0]["name"]
+    objective_mode = target_specs[0]["mode"]
 
     search_space = exp.get("search_space", {}) or {}
     param_meta: list[dict[str, Any]] = []
@@ -117,6 +139,7 @@ def extract_ax_campaign_metadata(path: Path) -> dict[str, Any]:
         "campaign_name": name,
         "objective_target": target_name,
         "objective_mode": objective_mode,
+        "targets": target_specs,
         "acquisition": "Ax default (internal)",
         "parameter_names": [p["name"] for p in param_meta if p.get("name")],
         "parameters": param_meta,
@@ -163,8 +186,11 @@ class AxEngine(CampaignEngine):
 
         client = AxClient(verbose_logging=False)
         params = _build_ax_parameters(cfg)
+        # Multi-objective: pass one ObjectiveProperties per target. Ax interprets
+        # an objectives dict with len > 1 as a Pareto / multi-objective experiment.
         objectives = {
-            cfg.objective_target: ObjectiveProperties(minimize=(cfg.objective_mode == "minimize"))
+            t.name: ObjectiveProperties(minimize=(t.mode == "minimize"))
+            for t in cfg.effective_targets()
         }
 
         gen_kwargs: dict[str, Any] = {}
@@ -199,8 +225,6 @@ class AxEngine(CampaignEngine):
     @classmethod
     def _infer_config(cls, client: Any) -> CampaignConfig:
         exp = client.experiment
-        objective_name = client.objective_name
-        minimize = client.objective.minimize if hasattr(client, "objective") else False
         params: list[ParameterSpec] = []
         for p in exp.search_space.parameters.values():
             from ax.core.parameter import RangeParameter, ChoiceParameter, ParameterType
@@ -218,6 +242,36 @@ class AxEngine(CampaignEngine):
                     params.append(NumericalDiscreteSpec(name=p.name, values=[float(v) for v in vals]))
                 else:
                     params.append(CategoricalSpec(name=p.name, values=[str(v) for v in vals]))
+
+        # Detect multi-objective from the OptimizationConfig
+        targets: list[TargetSpec] = []
+        opt_cfg = getattr(exp, "optimization_config", None)
+        ax_objective = getattr(opt_cfg, "objective", None) if opt_cfg is not None else None
+        sub_objectives = getattr(ax_objective, "objectives", None)
+        if sub_objectives:
+            for sub in sub_objectives:
+                metric_name = getattr(getattr(sub, "metric", None), "name", None)
+                if metric_name is None:
+                    continue
+                targets.append(
+                    TargetSpec(
+                        name=metric_name,
+                        mode="minimize" if getattr(sub, "minimize", False) else "maximize",
+                    )
+                )
+
+        if targets:
+            primary = targets[0]
+            return CampaignConfig(
+                campaign_name=exp.name,
+                objective_target=primary.name,
+                objective_mode=primary.mode,
+                parameters=params,
+                targets=targets,
+            )
+
+        objective_name = client.objective_name
+        minimize = client.objective.minimize if hasattr(client, "objective") else False
         return CampaignConfig(
             campaign_name=exp.name,
             objective_target=objective_name,
@@ -261,8 +315,8 @@ class AxEngine(CampaignEngine):
             )
 
         param_cols = [p.name for p in self.cfg.parameters]
-        target_col = self.cfg.objective_target
-        missing_cols = [c for c in (param_cols + [target_col]) if c not in df.columns]
+        target_cols = [t.name for t in self.cfg.effective_targets()]
+        missing_cols = [c for c in (param_cols + target_cols) if c not in df.columns]
         if missing_cols:
             raise ValueError(f"Missing required columns for ingestion: {missing_cols}.")
 
@@ -271,16 +325,16 @@ class AxEngine(CampaignEngine):
             trial_idx = self._get_or_attach_trial(row, param_cols)
 
             if status == "completed":
-                raw_val = row[target_col]
-                if pd.isna(raw_val):
-                    raise ValueError(
-                        f"Row with status='completed' has a missing target value for '{target_col}'. "
-                        "Completed trials must have a numeric target value."
-                    )
-                self._client.complete_trial(
-                    trial_index=trial_idx,
-                    raw_data={target_col: (float(raw_val), None)},
-                )
+                raw_data: dict[str, tuple[float, None]] = {}
+                for target_col in target_cols:
+                    raw_val = row[target_col]
+                    if pd.isna(raw_val):
+                        raise ValueError(
+                            f"Row with status='completed' has a missing target value for '{target_col}'. "
+                            "Completed trials must have a numeric value for every configured target."
+                        )
+                    raw_data[target_col] = (float(raw_val), None)
+                self._client.complete_trial(trial_index=trial_idx, raw_data=raw_data)
             elif status == "abandoned":
                 self._client.abandon_trial(trial_index=trial_idx, reason=status)
             else:
@@ -298,10 +352,13 @@ class AxEngine(CampaignEngine):
             for _, row in candidates.iterrows()
         ]
 
+        targets = self.cfg.effective_targets()
+        target_names = [t.name for t in targets]
+
         try:
             preds = self._client.get_model_predictions_for_parameterizations(
                 parameterizations=parameterizations,
-                metric_names=[self.cfg.objective_target],
+                metric_names=target_names,
             )
         except Exception as exc:
             raise ModelNotFittedError(
@@ -310,17 +367,36 @@ class AxEngine(CampaignEngine):
                 "Bayesian optimisation phase."
             ) from exc
 
-        target = self.cfg.objective_target
         out = candidates.copy()
-        out["pred_mean"] = [float(p[target][0]) for p in preds]
-        out["pred_std"] = [float(p[target][1]) for p in preds]
-        # Ax doesn't expose per-candidate acquisition values for arbitrary points;
-        # rank by predicted mean adjusted for optimisation direction.
-        if self.cfg.objective_mode == "minimize":
-            out["acq_score"] = -out["pred_mean"]
-        else:
-            out["acq_score"] = out["pred_mean"]
-        out["rank"] = out["acq_score"].rank(ascending=False, method="first").astype(int)
+
+        if len(targets) == 1:
+            target = targets[0]
+            out["pred_mean"] = [float(p[target.name][0]) for p in preds]
+            out["pred_std"] = [float(p[target.name][1]) for p in preds]
+            # Ax doesn't expose per-candidate acquisition values for arbitrary points;
+            # rank by predicted mean adjusted for optimisation direction.
+            if target.mode == "minimize":
+                out["acq_score"] = -out["pred_mean"]
+            else:
+                out["acq_score"] = out["pred_mean"]
+            out["rank"] = out["acq_score"].rank(ascending=False, method="first").astype(int)
+            return out
+
+        # Multi-objective: per-target prediction columns + Pareto rank.
+        means = []
+        for t in targets:
+            mean_col = f"{t.name}_pred_mean"
+            std_col = f"{t.name}_pred_std"
+            mean_vals = [float(p[t.name][0]) for p in preds]
+            std_vals = [float(p[t.name][1]) for p in preds]
+            out[mean_col] = mean_vals
+            out[std_col] = std_vals
+            means.append(mean_vals)
+
+        import numpy as np
+        points = np.array(means).T  # shape (n_candidates, n_targets)
+        maximize_mask = np.array([t.mode != "minimize" for t in targets], dtype=bool)
+        out["pareto_rank"] = _pareto_ranks(points, maximize_mask)
         return out
 
     def save(self, path: Path) -> None:
@@ -407,3 +483,45 @@ def _coerce_ax_value(val: Any, specs: list[ParameterSpec], col_name: str) -> Any
     if isinstance(spec, NumericalDiscreteSpec):
         return float(val)
     return str(val)
+
+
+def _pareto_ranks(points: Any, maximize_mask: Any) -> list[int]:
+    """Non-dominated sort: rank 1 = first Pareto front, rank 2 = second, etc.
+
+    Args:
+        points: (n, m) array-like of objective values for n candidates and m targets.
+        maximize_mask: (m,) bool array; True = maximize that objective.
+
+    Returns:
+        List of integer ranks length n. A point is on the k-th Pareto front if
+        it is not dominated by any point not yet assigned to fronts 1..k-1.
+    """
+    import numpy as np
+
+    pts = np.asarray(points, dtype=float).copy()
+    mask = np.asarray(maximize_mask, dtype=bool)
+    # Convert minimize objectives to maximize via negation so domination check is uniform.
+    pts[:, ~mask] = -pts[:, ~mask]
+
+    n = pts.shape[0]
+    ranks = [0] * n
+    remaining = set(range(n))
+    front = 1
+    while remaining:
+        current_front: list[int] = []
+        for i in remaining:
+            dominated = False
+            for j in remaining:
+                if i == j:
+                    continue
+                # j dominates i iff j >= i on all axes and j > i on at least one axis.
+                if np.all(pts[j] >= pts[i]) and np.any(pts[j] > pts[i]):
+                    dominated = True
+                    break
+            if not dominated:
+                current_front.append(i)
+        for i in current_front:
+            ranks[i] = front
+        remaining -= set(current_front)
+        front += 1
+    return ranks

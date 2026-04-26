@@ -287,7 +287,7 @@ Expose internal model predictions to the user.
 - Placeholder values ✅ enforced
 - Static or cached outputs presented as live ✅ enforced — predictions recomputed from current model state on each page load
 
-## Phase 5: Multi-Objective Optimization — ❌ NOT STARTED
+## Phase 5: Multi-Objective Optimization — ✅ COMPLETE
 
 ---
 
@@ -299,42 +299,49 @@ Support optimization across multiple targets.
 
 ### Requirements
 
-- Multiple targets must be definable in schema
+- Multiple targets must be definable in schema ✅
 - Each target must specify:
-  - name
-  - direction (maximize/minimize)
+  - name ✅
+  - direction (maximize/minimize) ✅
 
-**Still needed:**
-- Extend `CampaignConfig` to support a list of target specs.
-- Ax engine: full multi-objective support.
-- BayBE engine: disable multi-objective in UI with explicit label (not a silent fallback).
-- Pareto front display in dashboard.
+**Done:**
+- `TargetSpec(name, mode)` dataclass added to `core/schema.py`.
+- `CampaignConfig.targets: List[TargetSpec]` field; legacy `objective_target`/`objective_mode` continue to work for single-target campaigns.
+- `CampaignConfig.effective_targets()` returns a uniform `List[TargetSpec]` from either source.
+- `is_multi_objective()` helper for UI/engine branching.
+- `validate_config_payload` accepts the new `targets` key; `validate_campaign_config` rejects invalid modes / duplicate target names.
+- AxEngine multi-objective support: `from_config` passes one `ObjectiveProperties` per target to `AxClient.create_experiment` (Ax interprets `len > 1` as Pareto). `ingest()` collects all target metric values into `complete_trial(raw_data=...)` and raises if any completed row is missing a target. `predict()` returns per-target `{name}_pred_mean`/`{name}_pred_std` columns plus a `pareto_rank` column (computed via `_pareto_ranks` non-dominated sort).
+- BayBE multi-objective is explicitly rejected via `validate_campaign_config` ("Multi-objective optimization is not supported by the BayBE engine in this build. Switch to the Ax engine…"). No silent fallback.
+- `extract_ax_campaign_metadata` reads `MultiObjective` from saved Ax JSON snapshots; primary target preserved for backwards compatibility while full target list is also surfaced.
+- Configure page UI: per-target name + direction editors with add/remove buttons. Auto-reverts to single-target storage when only one target remains.
+- Ingest page: every configured target column required & numeric for completed rows. Multi-objective campaigns drop the [0,1] fraction constraint (only numeric is enforced) since targets like cost or impurity have no fraction interpretation.
+- Tests: `tests/test_multi_objective.py` — 20 tests covering schema, validation, AxEngine multi-objective wiring, Pareto rank computation, and dashboard Pareto mask.
 
 ---
 
 ### Backend Support
 
 #### Ax
-- Full multi-objective support required ❌
+- Full multi-objective support required ✅ — `objectives` dict with `len > 1` engages Ax's MOO generation strategy
 
 #### BayBE
 - If unsupported:
-  - Feature must be disabled in UI ❌
-  - Must NOT silently fallback to single-objective
+  - Feature must be disabled in UI ✅ — `validate_campaign_config` rejects multi-target BayBE configs; the error surfaces in Configure & Initialize pages
+  - Must NOT silently fallback to single-objective ✅ — `validate_campaign_config` returns an explicit error before any engine is built
 
 ---
 
 ### UI Requirements
 
-- Display Pareto front
-- Allow selection of trade-off points
+- Display Pareto front ✅ — `core/campaign_dashboard.py` `_render_pareto_section` with `compute_pareto_mask` + `make_pareto_plot`. Auto-rendered when `target_specs` (passed from `app.render_campaign_dashboard_page`) includes ≥ 2 targets present in `all_runs.csv`.
+- Allow selection of trade-off points ✅ — Pareto-optimal trials surfaced in their own table with target columns + status; X / Y axis selectors let the user inspect any 2 of N objectives.
 
 ---
 
 ### Forbidden
 
-- Pretending multi-objective support exists
-- Collapsing objectives without user knowledge
+- Pretending multi-objective support exists ✅ enforced — BayBE multi-target rejected loudly
+- Collapsing objectives without user knowledge ✅ enforced — no scalarization shortcut; Ax is the only path
 
 ## Phase 6: Search Space Editing — ❌ NOT STARTED
 
@@ -432,8 +439,9 @@ Prevent redundant or wasteful experiments.
 - Status handling ✅ (`test_trial_status.py` — 10 tests)
 - Model predictions ✅ (`test_model_visibility.py` — 9 tests)
 - AxEngine full coverage ✅ (`test_ax_engine.py` — 29 tests)
+- Multi-objective ✅ (`test_multi_objective.py` — 20 tests)
 
-Total: 58 tests, all passing.
+Total: 78 tests, all passing.
 
 ---
 

@@ -202,6 +202,68 @@ def make_numerical_param_plot(df: pd.DataFrame, parameter: str, objective_col: s
     return fig
 
 
+def compute_pareto_mask(
+    df: pd.DataFrame,
+    objective_cols: Sequence[str],
+    maximize_flags: Sequence[bool],
+) -> np.ndarray:
+    """Return a bool mask marking rows on the (first) Pareto front.
+
+    A row is on the Pareto front iff no other row dominates it: another row
+    must be at least as good on every objective and strictly better on at
+    least one objective.
+    """
+    if len(objective_cols) != len(maximize_flags):
+        raise ValueError("objective_cols and maximize_flags must have equal length.")
+
+    sub = df[list(objective_cols)].to_numpy(dtype=float, copy=True)
+    flags = np.asarray(maximize_flags, dtype=bool)
+    sub[:, ~flags] = -sub[:, ~flags]
+
+    n = sub.shape[0]
+    mask = np.ones(n, dtype=bool)
+    for i in range(n):
+        if not mask[i]:
+            continue
+        for j in range(n):
+            if i == j:
+                continue
+            # j dominates i?
+            if np.all(sub[j] >= sub[i]) and np.any(sub[j] > sub[i]):
+                mask[i] = False
+                break
+    return mask
+
+
+def make_pareto_plot(
+    df: pd.DataFrame,
+    objective_x: str,
+    objective_y: str,
+    maximize_x: bool,
+    maximize_y: bool,
+    pareto_mask: np.ndarray,
+) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    x = df[objective_x].to_numpy(dtype=float)
+    y = df[objective_y].to_numpy(dtype=float)
+    ax.scatter(x[~pareto_mask], y[~pareto_mask], alpha=0.55, color="tab:gray", label="Dominated")
+    ax.scatter(x[pareto_mask], y[pareto_mask], alpha=0.95, color="tab:red", s=70, label="Pareto front")
+
+    # Draw the Pareto frontier as a step line for visual clarity.
+    if pareto_mask.sum() >= 2:
+        order = np.argsort(x[pareto_mask] * (1 if maximize_x else -1))
+        px = x[pareto_mask][order]
+        py = y[pareto_mask][order]
+        ax.plot(px, py, color="tab:red", linewidth=1.2, alpha=0.7)
+
+    ax.set_xlabel(f"{objective_x} ({'max' if maximize_x else 'min'})")
+    ax.set_ylabel(f"{objective_y} ({'max' if maximize_y else 'min'})")
+    ax.set_title("Pareto Front")
+    ax.grid(alpha=0.3)
+    ax.legend()
+    return fig
+
+
 def _format_metric(value: Any) -> str:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return "N/A"
@@ -220,7 +282,13 @@ def _to_summary_json(stats: Dict[str, Any], objective_col: str, maximize: bool, 
     return json.dumps(payload, indent=2)
 
 
-def render_campaign_dashboard(df_trials: pd.DataFrame, campaign_dir: Optional[Path] = None) -> None:
+def render_campaign_dashboard(
+    df_trials: pd.DataFrame,
+    campaign_dir: Optional[Path] = None,
+    target_specs: Optional[Sequence[Dict[str, str]]] = None,
+) -> None:
+    """Render dashboard. If target_specs (list of {name, mode} dicts) is
+    provided and contains >= 2 entries, also render a Pareto front section."""
     st.subheader("Campaign Dashboard")
     if df_trials is None or df_trials.empty:
         st.info("No campaign trials available yet. Ingest results first.")
@@ -233,15 +301,34 @@ def render_campaign_dashboard(df_trials: pd.DataFrame, campaign_dir: Optional[Pa
     if "trial_index" in df.columns:
         df = df.sort_values("trial_index").reset_index(drop=True)
 
-    parameter_columns = infer_parameter_columns(df)
+    # Treat configured target columns as bookkeeping for parameter inference,
+    # so they are not mistaken for design parameters.
+    bookkeeping_extra = set()
+    if target_specs:
+        bookkeeping_extra.update(t.get("name") for t in target_specs if t.get("name"))
+    parameter_columns = [
+        c for c in infer_parameter_columns(df) if c not in bookkeeping_extra
+    ]
     candidate_objective_columns = _candidate_objective_columns(df, parameter_columns)
+    if target_specs:
+        configured_names = [t["name"] for t in target_specs if t.get("name") in df.columns]
+        # Surface configured targets first, preserving order.
+        candidate_objective_columns = configured_names + [
+            c for c in candidate_objective_columns if c not in configured_names
+        ]
     if not candidate_objective_columns:
         st.warning("No numeric objective-like columns found in the trials table.")
         st.dataframe(df, use_container_width=True)
         return
 
     objective_col = st.selectbox("Objective column", candidate_objective_columns)
-    maximize = st.toggle("Maximize objective", value=True)
+    default_max = True
+    if target_specs:
+        for t in target_specs:
+            if t.get("name") == objective_col:
+                default_max = (t.get("mode") != "minimize")
+                break
+    maximize = st.toggle("Maximize objective", value=default_max)
     completed_only = st.checkbox("Use completed trials only", value=True)
     selected_params = st.multiselect("Parameters to analyze", parameter_columns, default=parameter_columns)
 
@@ -332,6 +419,9 @@ def render_campaign_dashboard(df_trials: pd.DataFrame, campaign_dir: Optional[Pa
         st.pyplot(fig)
         save_figure(fig, f"objective_by_{grouping_col}.png", campaign_dir)
 
+    if target_specs and len([t for t in target_specs if t.get("name") in df_completed.columns]) >= 2:
+        _render_pareto_section(df_completed, target_specs, campaign_dir)
+
     st.markdown("### Raw Data")
     st.dataframe(df_completed, use_container_width=True)
     st.download_button(
@@ -346,3 +436,70 @@ def render_campaign_dashboard(df_trials: pd.DataFrame, campaign_dir: Optional[Pa
         file_name="campaign_dashboard_summary.json",
         mime="application/json",
     )
+
+
+def _render_pareto_section(
+    df_completed: pd.DataFrame,
+    target_specs: Sequence[Dict[str, str]],
+    campaign_dir: Optional[Path],
+) -> None:
+    available = [t for t in target_specs if t.get("name") in df_completed.columns]
+    if len(available) < 2:
+        return
+
+    st.markdown("### Pareto Front (multi-objective)")
+    st.caption(
+        "Computed over completed trials only. A point is on the Pareto front if "
+        "no other trial is at least as good on every configured target and strictly "
+        "better on at least one."
+    )
+
+    name_to_mode = {t["name"]: t.get("mode", "maximize") for t in available}
+    target_names = list(name_to_mode.keys())
+
+    objective_cols = list(target_names)
+    maximize_flags = [name_to_mode[n] != "minimize" for n in objective_cols]
+    valid_rows = df_completed[objective_cols].apply(
+        lambda col: pd.to_numeric(col, errors="coerce")
+    )
+    keep = ~valid_rows.isna().any(axis=1)
+    df_pareto = df_completed.loc[keep].copy()
+    if df_pareto.empty:
+        st.info("No completed trials with values for every configured target.")
+        return
+
+    df_pareto[objective_cols] = valid_rows.loc[keep]
+    pareto_mask = compute_pareto_mask(df_pareto, objective_cols, maximize_flags)
+    df_pareto["pareto_optimal"] = pareto_mask
+
+    col_x, col_y = st.columns(2)
+    with col_x:
+        x_axis = st.selectbox("X axis target", target_names, index=0, key="pareto_x")
+    with col_y:
+        default_y = 1 if len(target_names) > 1 else 0
+        y_axis = st.selectbox("Y axis target", target_names, index=default_y, key="pareto_y")
+
+    if x_axis == y_axis:
+        st.info("Pick two different targets to plot a Pareto scatter.")
+    else:
+        fig = make_pareto_plot(
+            df_pareto,
+            objective_x=x_axis,
+            objective_y=y_axis,
+            maximize_x=name_to_mode[x_axis] != "minimize",
+            maximize_y=name_to_mode[y_axis] != "minimize",
+            pareto_mask=pareto_mask,
+        )
+        st.pyplot(fig)
+        save_figure(fig, f"pareto_{x_axis}_vs_{y_axis}.png", campaign_dir)
+
+    st.markdown("#### Pareto-optimal trials")
+    pareto_rows = df_pareto[pareto_mask]
+    show_cols: List[str] = []
+    if "trial_index" in pareto_rows.columns:
+        show_cols.append("trial_index")
+    show_cols.extend(target_names)
+    if "status" in pareto_rows.columns:
+        show_cols.append("status")
+    st.dataframe(pareto_rows[show_cols].reset_index(drop=True), use_container_width=True)
+    st.caption(f"{int(pareto_mask.sum())} of {len(df_pareto)} completed trials are Pareto-optimal.")

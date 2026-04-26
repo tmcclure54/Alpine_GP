@@ -1,4 +1,4 @@
-# Alpine-GP — Claude Working Document
+5 # Alpine-GP — Claude Working Document
 
 ## Project Purpose
 
@@ -13,21 +13,22 @@ Alpine-GP is a Bayesian optimization platform for chemistry. It surfaces a Strea
 ```
 app.py                         — Streamlit UI
 core/
-  schema.py                    — CampaignConfig (engine field: "baybe"|"ax") + ParameterSpec dataclasses
+  schema.py                    — CampaignConfig (engine + targets list) + ParameterSpec/TargetSpec dataclasses
   campaign_engine.py           — CampaignEngine ABC + factory functions (route by engine type)
   baybe_engine.py              — BayBEEngine (implements CampaignEngine)
-  ax_engine.py                 — AxEngine (implements CampaignEngine via AxClient)
-  baybe_factory.py             — BayBE object construction + validation (engine-aware)
+  ax_engine.py                 — AxEngine (implements CampaignEngine via AxClient; multi-objective capable)
+  baybe_factory.py             — BayBE object construction + validation (engine-aware; rejects multi-target BayBE)
   persistence.py               — File I/O helpers
   sobol_init.py                — Sobol initial-design generator
   dedup.py                     — Duplicate-point detection
-  campaign_dashboard.py        — Dashboard rendering helpers
+  campaign_dashboard.py        — Dashboard rendering helpers (incl. Pareto front for multi-objective)
 tests/
   test_campaign_engine.py      — Engine interface + save/load/ingest tests
   test_truthful_controls.py    — Validation + wiring tests
   test_trial_status.py         — Trial status system tests (10 tests)
   test_model_visibility.py     — Model predictions tests (9 tests)
   test_ax_engine.py            — AxEngine tests (29 tests)
+  test_multi_objective.py      — Multi-objective tests (20 tests)
 ```
 
 ---
@@ -82,9 +83,19 @@ tests/
 - Sortable model output table; degrades gracefully with info message when model not fitted.
 - Tests: `test_model_visibility.py` — 9 tests.
 
-**Total: 58 tests, all passing.**
+### Phase 5: Multi-Objective Optimization — COMPLETE
+- `TargetSpec(name, mode)` in `schema.py`; `CampaignConfig.targets: List[TargetSpec]`.
+- `CampaignConfig.effective_targets()` bridges legacy single-target (`objective_target`/`objective_mode`) and explicit multi-target lists.
+- `validate_campaign_config` rejects multi-target BayBE configs with explicit error (no silent fallback).
+- `AxEngine.from_config` builds an `objectives` dict with one `ObjectiveProperties` per target — Ax interprets `len > 1` as Pareto / multi-objective.
+- `AxEngine.ingest` collects every configured target's value into `complete_trial(raw_data=...)`; raises if any completed row is missing a target.
+- `AxEngine.predict` for multi-target returns per-target `{name}_pred_mean` / `{name}_pred_std` columns plus `pareto_rank` (1 = first non-dominated front, 2 = next, etc.) via `_pareto_ranks`. Single-target predict is unchanged.
+- Configure page UI: add/remove targets, per-target direction selector. Auto-reverts to single-target when only 1 target remains.
+- Ingest validation requires every configured target column present and numeric for completed rows. Multi-objective campaigns drop the legacy [0,1] fraction constraint; only numeric is enforced.
+- Dashboard renders a Pareto Front section when `target_specs` includes ≥ 2 targets present in `all_runs.csv`. Includes axis selectors, Pareto-optimal-only table, and a `pareto_<x>_vs_<y>.png` artifact.
+- `extract_ax_campaign_metadata` reads `MultiObjective` from saved Ax JSON; surfaces full target list in metadata.
 
-### Phase 5: Multi-Objective Optimization — NOT STARTED
+**Total: 78 tests, all passing.**
 
 ### Phase 6: Search Space Editing — NOT STARTED
 
@@ -96,13 +107,7 @@ tests/
 
 ## Execution Plan (priority order)
 
-### Next: Phase 5 — Multi-Objective (Ax only)
-- Extend `CampaignConfig` to hold a list of target specs.
-- Ax engine: multi-objective support.
-- BayBE: disable with explicit UI label (not silent fallback).
-- Pareto front display in dashboard.
-
-### Later: Phase 6 — Search Space Editing
+### Next: Phase 6 — Search Space Editing
 - Snapshot-before-mutate; append-only history.
 
 ### Later: Phase 7 (remainder) — Dedup Hygiene
